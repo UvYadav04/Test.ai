@@ -1,3 +1,5 @@
+from typing import Optional
+
 from tools.tabular.duckdb_utils import connect, register_view, run_query
 from tools.tabular.models import (
     ColumnProfile,
@@ -121,7 +123,7 @@ class TabularTools:
         result = run_query(self.con, sql, row_cap, timeout_seconds)
         return QueryResult(**result)
 
-    def aggregate(self, file_ids: list, group_by: list, metrics: list[MetricSpec], filters: dict = None) -> QueryResult:
+    def aggregate(self, file_ids: list, group_by: list, metrics: list[MetricSpec], filters: Optional[dict] = None) -> QueryResult:
         """Compute grouped sum/avg/count/min/max metrics without writing SQL - prefer this over
         query_data for simple group-by aggregations. Each item in metrics needs: column (str),
         op (one of sum|avg|count|min|max), alias (optional str, defaults to "{op}_{column}").
@@ -178,7 +180,7 @@ class TabularTools:
             top_values=[(r[0], r[1]) for r in top],
         )
 
-    def validate_result(self, result: QueryResult, expected_shape: dict = None) -> ValidationReport:
+    def validate_result(self, result: QueryResult, expected_shape: Optional[dict] = None) -> ValidationReport:
         """Sanity-check a QueryResult before reporting it as a finding: flags 0-row results,
         fewer rows than expected_shape's min_rows (optional {"min_rows": int}), and negative
         values in revenue-like columns. Always call this on your final result before writing
