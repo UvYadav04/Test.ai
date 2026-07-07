@@ -1,55 +1,46 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from docling.chunking import HybridChunker
+
 
 @dataclass
 class Chunk:
     text: str
     chunk_index: int
     page: int
+    section: str = ""
 
 
 class BaseChunker(ABC):
     @abstractmethod
-    def chunk_pages(self, pages_text: list) -> list:
+    def chunk_document(self, document) -> list:
         raise NotImplementedError
 
 
-class SemanticChunker(BaseChunker):
-    def __init__(self, max_chars: int = 1500):
-        self.max_chars = max_chars
+class DoclingChunker(BaseChunker):
+    def __init__(self):
+        self.chunker = HybridChunker()
 
-    def chunk_pages(self, pages_text: list) -> list:
+    def chunk_document(self, document) -> list:
         chunks = []
-        index = 0
-
-        for page_num, text in enumerate(pages_text, start=1):
-            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-            heading = ""
-
-            for para in paragraphs:
-                is_heading = len(para) < 60 and "\n" not in para
-
-                if is_heading:
-                    heading = para
-                    continue
-
-                combined = f"{heading}\n{para}" if heading else para
-                heading = ""
-
-                if len(combined) <= self.max_chars:
-                    chunks.append(Chunk(text=combined, chunk_index=index, page=page_num))
-                    index += 1
-                else:
-                    start = 0
-                    while start < len(combined):
-                        window = combined[start:start + self.max_chars]
-                        chunks.append(Chunk(text=window, chunk_index=index, page=page_num))
-                        index += 1
-                        start += self.max_chars
-
-            if heading:
-                chunks.append(Chunk(text=heading, chunk_index=index, page=page_num))
-                index += 1
-
+        for index, chunk in enumerate(self.chunker.chunk(document)):
+            headings = getattr(chunk.meta, "headings", None) or []
+            chunks.append(Chunk(
+                text=self._text_of(chunk, headings),
+                chunk_index=index,
+                page=self._page_of(chunk),
+                section=headings[-1] if headings else "",
+            ))
         return chunks
+
+    def _text_of(self, chunk, headings: list) -> str:
+        if headings:
+            return "\n".join(headings) + "\n" + chunk.text
+        return chunk.text
+
+    def _page_of(self, chunk) -> int:
+        try:
+            return chunk.meta.doc_items[0].prov[0].page_no
+        except Exception:
+            return 0

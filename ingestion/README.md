@@ -3,7 +3,7 @@
 Turns uploaded files into a form the agents can query later.
 
 - CSV / JSON -> Parquet, via `IngestionManager` + `LocalParquetStore`.
-- PDF -> chunked (by paragraph/heading, see `SemanticChunker`) and stored in Chroma.
+- PDF -> parsed and chunked by `DoclingChunker` (docling's `HybridChunker`, keeps headings with their paragraphs) and stored in Chroma Cloud.
 
 ## Add a new file type
 

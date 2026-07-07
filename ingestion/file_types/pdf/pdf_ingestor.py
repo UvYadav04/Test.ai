@@ -1,8 +1,8 @@
 import uuid
 
 from ingestion.file_types.base import BaseIngestor
-from ingestion.file_types.pdf.chunker import BaseChunker, SemanticChunker
-from ingestion.file_types.pdf.utils import extract_text_per_page, is_scanned
+from ingestion.file_types.pdf.chunker import BaseChunker, DoclingChunker
+from ingestion.file_types.pdf.utils import convert_document, get_page_count, is_scanned
 from ingestion.models import IngestionResult
 from vectordb.schema import ChunkRecord
 
@@ -10,28 +10,28 @@ from vectordb.schema import ChunkRecord
 class PDFIngestor(BaseIngestor):
     def __init__(self, storage=None, vector_store=None, chunker: BaseChunker = None):
         super().__init__(storage=storage, vector_store=vector_store)
-        self.chunker = chunker or SemanticChunker()
+        self.chunker = chunker or DoclingChunker()
 
     def validate(self, file_path: str) -> bool:
         try:
-            pages = extract_text_per_page(file_path)
-            return len(pages) > 0
+            document = convert_document(file_path)
+            return get_page_count(document) > 0
         except Exception:
             return False
 
     def extract_metadata(self, file_path: str) -> dict:
-        pages = extract_text_per_page(file_path)
-        return {"page_count": len(pages), "is_scanned": is_scanned(pages)}
+        document = convert_document(file_path)
+        return {"page_count": get_page_count(document), "is_scanned": is_scanned(document)}
 
     def ingest(self, file_path: str, workspace_id: str, file_id: str) -> IngestionResult:
         try:
-            pages = extract_text_per_page(file_path)
+            document = convert_document(file_path)
             errors = []
 
-            if is_scanned(pages):
+            if is_scanned(document):
                 errors.append("PDF looks scanned, OCR not implemented yet")
 
-            chunks = self.chunker.chunk_pages(pages)
+            chunks = self.chunker.chunk_document(document)
 
             chunk_records = []
             for chunk in chunks:
@@ -41,7 +41,7 @@ class PDFIngestor(BaseIngestor):
                     workspace_id=workspace_id,
                     text=chunk.text,
                     embedding=None,
-                    metadata={"page": chunk.page, "chunk_index": chunk.chunk_index},
+                    metadata={"page": chunk.page, "chunk_index": chunk.chunk_index, "section": chunk.section},
                 ))
 
             if self.vector_store is None:
@@ -57,7 +57,7 @@ class PDFIngestor(BaseIngestor):
                 workspace_id=workspace_id,
                 status=status,
                 output_ref=f"workspace_{workspace_id}",
-                schema_summary={"page_count": len(pages)},
+                schema_summary={"page_count": get_page_count(document)},
                 chunk_count=len(chunk_records),
                 errors=errors,
             )

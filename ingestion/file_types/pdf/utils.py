@@ -1,16 +1,16 @@
-from pypdf import PdfReader
+from docling.document_converter import DocumentConverter
 
 
-def extract_text_per_page(file_path: str) -> list:
-    reader = PdfReader(file_path)
-    pages = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
-    return pages
+def convert_document(file_path: str):
+    converter = DocumentConverter()
+    result = converter.convert(file_path)
+    return result.document
 
 
-def is_scanned(pages: list) -> bool:
-    if not pages:
-        return False
-    avg_chars = sum(len(p.strip()) for p in pages) / len(pages)
-    return avg_chars < 20
+def get_page_count(document) -> int:
+    return len(document.pages)
+
+
+def is_scanned(document) -> bool:
+    text = document.export_to_text()
+    return len(text.strip()) < 20

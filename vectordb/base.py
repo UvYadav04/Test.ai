@@ -18,3 +18,7 @@ class BaseVectorStore(ABC):
     @abstractmethod
     def get_by_id(self, ids: list) -> list:
         raise NotImplementedError
+
+    @abstractmethod
+    def get_by_filter(self, filters: dict) -> list:
+        raise NotImplementedError

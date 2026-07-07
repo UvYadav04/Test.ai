@@ -1,9 +1,12 @@
 pandas
 pyarrow
+duckdb
 chromadb
-pypdf
+docling
+sentence-transformers
+rapidfuzz
 python-dotenv
+autogen-core
 autogen-agentchat
 autogen-ext[openai]
 autogen-ext[anthropic]
-python-dotenv
