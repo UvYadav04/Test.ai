@@ -7,9 +7,11 @@ from ingestion.storage.base import BaseObjectStore
 
 class LocalParquetStore(BaseObjectStore):
     def __init__(self, root_dir: str = "data/parquet"):
+        print("root dir: ",root_dir)
         self.root_dir = root_dir
 
     def write(self, data: pd.DataFrame, path: str) -> str:
+        print("path: ",path)
         full_path = os.path.join(self.root_dir, path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         data.to_parquet(full_path, index=False)

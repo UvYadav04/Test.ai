@@ -3,7 +3,7 @@
 Turns uploaded files into a form the agents can query later.
 
 - CSV / JSON -> Parquet, via `IngestionManager` + `LocalParquetStore`.
-- PDF -> parsed and chunked by `DoclingChunker` (docling's `HybridChunker`, keeps headings with their paragraphs) and stored in Chroma Cloud.
+- PDF -> parsed and chunked by `DoclingChunker` (docling's `HybridChunker`, keeps headings with their paragraphs) and stored in Chroma Cloud as plain text - Chroma embeds it automatically with its bundled default model, no separate embedding step needed.
 
 ## Add a new file type
 
@@ -16,4 +16,3 @@ Implement `BaseObjectStore` or `BaseVectorStore` and pass your class into `Inges
 ## Not done yet
 
 - No OCR for scanned PDFs.
-- No embedding model wired in - `ChunkRecord.embedding` stays `None` until that's added.

@@ -4,8 +4,6 @@ from config import get_settings
 from vectordb.base import BaseVectorStore
 from vectordb.schema import ChunkRecord
 
-EMBEDDING_DIM = 8
-
 
 class ChromaVectorStore(BaseVectorStore):
     def __init__(self):
@@ -24,14 +22,13 @@ class ChromaVectorStore(BaseVectorStore):
             {"file_id": c.file_id, "workspace_id": c.workspace_id, **c.metadata}
             for c in chunks
         ]
-        embeddings = [c.embedding if c.embedding else [0.0] * EMBEDDING_DIM for c in chunks]
 
-        self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+        self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         return ids
 
-    def query(self, embedding: list, top_k: int, filters: dict = None) -> list:
+    def query(self, query_text: str, top_k: int, filters: dict = None) -> list:
         result = self.collection.query(
-            query_embeddings=[embedding],
+            query_texts=[query_text],
             n_results=top_k,
             where=filters,
             include=["documents", "metadatas", "distances"],

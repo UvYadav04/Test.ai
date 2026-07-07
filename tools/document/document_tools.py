@@ -12,10 +12,9 @@ Does the chunk text support the claim? Answer with SUPPORTED or NOT_SUPPORTED, t
 
 
 class DocumentTools:
-    def __init__(self, assigned_files: list, vector_store, embed_fn, reranker=None, llm_provider=None):
+    def __init__(self, assigned_files: list, vector_store, reranker=None, llm_provider=None):
         self.assigned_file_ids = [f.file_id for f in assigned_files]
         self.vector_store = vector_store
-        self.embed_fn = embed_fn
         self.reranker = reranker
         self.llm_provider = llm_provider or LLMProvider()
 
@@ -31,11 +30,10 @@ class DocumentTools:
 
     def search_documents(self, query: str, file_ids: list = None, top_k: int = 8) -> list:
         scoped = self._scoped_file_ids(file_ids)
-        embedding = self.embed_fn(query)
         filters = {"file_id": {"$in": scoped}}
         fetch_k = top_k * 3 if self.reranker else top_k
 
-        chunks = self.vector_store.query(embedding, fetch_k, filters=filters)
+        chunks = self.vector_store.query(query, fetch_k, filters=filters)
         if self.reranker:
             chunks = self.reranker.rank(query, chunks, top_k=top_k)
 

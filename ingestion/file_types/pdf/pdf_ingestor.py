@@ -33,16 +33,16 @@ class PDFIngestor(BaseIngestor):
 
             chunks = self.chunker.chunk_document(document)
 
-            chunk_records = []
-            for chunk in chunks:
-                chunk_records.append(ChunkRecord(
+            chunk_records = [
+                ChunkRecord(
                     chunk_id=f"{file_id}_{chunk.chunk_index}_{uuid.uuid4().hex[:8]}",
                     file_id=file_id,
                     workspace_id=workspace_id,
                     text=chunk.text,
-                    embedding=None,
                     metadata={"page": chunk.page, "chunk_index": chunk.chunk_index, "section": chunk.section},
-                ))
+                )
+                for chunk in chunks
+            ]
 
             if self.vector_store is None:
                 raise RuntimeError("no vector store provided")

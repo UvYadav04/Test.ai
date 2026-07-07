@@ -8,7 +8,7 @@ class BaseVectorStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def query(self, embedding: list, top_k: int, filters: Optional[dict] = None) -> list:
+    def query(self, query_text: str, top_k: int, filters: Optional[dict] = None) -> list:
         raise NotImplementedError
 
     @abstractmethod

@@ -3,7 +3,7 @@
 Tools each agent can call, grouped by agent type in their own folder.
 
 - `tabular/` - Tabular Agent tools (`TabularTools`), backed by DuckDB over the Parquet files ingestion produces. Scoped to whatever `FileRef` list the agent was assigned.
-- `document/` - Document Agent tools (`DocumentTools`), backed by the vector store. Needs a `vector_store`, an `embed_fn` (text -> vector, plugs in once an embedding model is wired up) and optionally a `CrossEncoderReranker`.
+- `document/` - Document Agent tools (`DocumentTools`), backed by the vector store. Needs a `vector_store` and optionally a `CrossEncoderReranker`. Queries go in as plain text - the vector store embeds them.
 - `orchestrator/` - Main Orchestrator tools (`OrchestratorTools`), backed by an in-memory `FileCatalog`. `invoke_tabular_agent`/`invoke_document_agent` are thin dispatchers - pass in the real agent loops once they exist.
 - `hypothesis/` - `HypothesisTools.generate_hypotheses`, a single bounded LLM call (no tools, no loop) used by the orchestrator before delegating on complex "why" queries.
 
