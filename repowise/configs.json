@@ -1,0 +1,30 @@
+{
+    "ollama_qwen_1_5b": {
+        "provider": "ollama",
+        "model": "qwen2.5:1.5b",
+        "embedder": "ollama",
+        "yes": true,
+        "resume": false,
+        "force": false,
+        "concurrency": 4,
+        "reasoning": "off",
+        "index_only": false,
+        "mode": "fast",
+        "skip_tests": false,
+        "skip_infra": false,
+        "exclude": [],
+        "commit_limit": 500,
+        "follow_renames": false,
+        "no_claude_md": false,
+        "agents": true,
+        "codex": true,
+        "distill_hook": true,
+        "include_submodules": false,
+        "no_workspace": true,
+        "all": false,
+        "onboarding": true,
+        "coverage": 0.20,
+        "harvest_decisions": true,
+        "wiki_style": "caveman"
+    }
+}

@@ -6,3 +6,4 @@ python-dotenv
 autogen-agentchat
 autogen-ext[openai]
 autogen-ext[anthropic]
+python-dotenv

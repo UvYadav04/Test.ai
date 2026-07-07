@@ -1,0 +1,8 @@
+.repowise
+.mcp.json
+AGENTS.md
+.venv
+.codex
+.claude
+__pycache__
+.env
