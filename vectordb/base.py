@@ -1,0 +1,20 @@
+from abc import ABC, abstractmethod
+from typing import Optional
+
+
+class BaseVectorStore(ABC):
+    @abstractmethod
+    def upsert(self, chunks: list) -> list:
+        raise NotImplementedError
+
+    @abstractmethod
+    def query(self, embedding: list, top_k: int, filters: Optional[dict] = None) -> list:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete(self, ids: list) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_by_id(self, ids: list) -> list:
+        raise NotImplementedError
