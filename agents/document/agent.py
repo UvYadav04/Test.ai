@@ -3,32 +3,40 @@ import json
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
+from agents.document.config import FORMAT_SYSTEM_MESSAGE, SYSTEM_MESSAGE, get_model_config
 from agents.logger import get_agent_logger, log_event
-from agents.tabular.config import FORMAT_SYSTEM_MESSAGE, SYSTEM_MESSAGE, get_model_config
 from llm_provider import LLMProvider
-from tools.orchestrator.models import TabularFindings
-from tools.tabular.tabular_tools import TabularTools
+from tools.document.document_tools import DocumentTools
+from tools.orchestrator.models import DocumentFindings
+from vectordb.chroma_store import ChromaVectorStore
+from vectordb.reranker import CrossEncoderReranker
 
 
-class TabularAgent:
-    def __init__(self, assigned_files: list):
-        self.logger = get_agent_logger("tabular_agent")
-        self.tools = TabularTools(assigned_files)
+class DocumentAgent:
+    def __init__(self, assigned_files: list, vector_store=None, reranker=None):
+        self.logger = get_agent_logger("document_agent")
         model_config = get_model_config()
-        client = LLMProvider(model_config["provider"]).get_client(model_config["model"])
+        provider = LLMProvider(model_config["provider"])
+        client = provider.get_client(model_config["model"])
+
+        vector_store = vector_store or ChromaVectorStore()
+        if reranker is None:
+            reranker = CrossEncoderReranker()
+
+        self.tools = DocumentTools(assigned_files, vector_store, reranker=reranker, llm_provider=provider)
 
         self.agent = AssistantAgent(
-            name="tabular_agent",
+            name="document_agent",
             model_client=client,
             tools=[
-                self.tools.list_allowed_files,
-                self.tools.inspect_schema,
-                self.tools.sample_rows,
-                self.tools.find_join_candidates,
-                self.tools.query_data,
-                self.tools.aggregate,
-                self.tools.describe_column,
-                self.tools.validate_result,
+                self.tools.search_documents,
+                self.tools.search_within_file,
+                self.tools.get_chunk,
+                self.tools.get_surrounding_chunks,
+                self.tools.list_file_sections,
+                self.tools.compare_documents,
+                self.tools.search_for_contradictions,
+                self.tools.verify_chunk_supports_claim,
             ],
             system_message=SYSTEM_MESSAGE,
             reflect_on_tool_use=False,
@@ -36,17 +44,21 @@ class TabularAgent:
         )
 
         self.formatter = AssistantAgent(
-            name="tabular_formatter",
+            name="document_formatter",
             model_client=client,
             system_message=FORMAT_SYSTEM_MESSAGE,
         )
 
-    async def run(self, objective: str, constraints: dict = None) -> TabularFindings:
+    async def run(self, objective: str, constraints: dict = None) -> DocumentFindings:
         await self.agent.on_reset(CancellationToken())
         await self.formatter.on_reset(CancellationToken())
 
         constraints = constraints or {}
-        task = f"Objective: {objective}\nConstraints: {constraints}"
+        task = (
+            f"Objective: {objective}\n"
+            f"Assigned file_ids: {self.tools.assigned_file_ids}\n"
+            f"Constraints: {constraints}"
+        )
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []
@@ -76,22 +88,23 @@ class TabularAgent:
             return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
         return ""
 
-    def _parse(self, raw: str) -> TabularFindings:
+    def _parse(self, raw: str) -> DocumentFindings:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             self.logger.warning("agent did not return valid JSON")
-            return TabularFindings(
+            return DocumentFindings(
                 summary=raw,
                 findings=[],
                 limitations="agent did not return valid JSON",
                 confidence="low",
             )
 
-        return TabularFindings(
+        return DocumentFindings(
             summary=data.get("summary", ""),
             findings=data.get("findings", []),
             limitations=data.get("limitations", ""),
             confidence=data.get("confidence", "low"),
             artifact_refs=data.get("artifact_refs", []),
+            source_refs=data.get("source_refs", []),
         )

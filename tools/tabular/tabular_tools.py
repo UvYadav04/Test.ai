@@ -1,5 +1,3 @@
-from typing import Optional
-
 from tools.tabular.duckdb_utils import connect, register_view, run_query
 from tools.tabular.models import (
     ColumnProfile,
@@ -24,8 +22,7 @@ class TabularTools:
             raise ValueError(f"file_id '{file_id}' is not assigned to this agent")
 
     def list_allowed_files(self) -> list:
-        """List every file this agent is allowed to query, with its row count and column names.
-        Call this FIRST, before anything else, to see what data you have access to."""
+        """Return metadata (row count, columns) for every file assigned to this agent."""
         files = []
         for file_id, file_ref in self.assigned_files.items():
             row_count = self.con.execute(f"SELECT COUNT(*) FROM {file_id}").fetchone()[0]
@@ -40,8 +37,7 @@ class TabularTools:
         return files
 
     def inspect_schema(self, file_id: str) -> SchemaInfo:
-        """Get exact column names, data types, nullability, and likely key columns for one file.
-        Call this before writing any query on a file, so column names/types in your SQL are correct."""
+        """Return column names, dtypes, nullability, and likely key columns for one assigned file."""
         self._check_assigned(file_id)
 
         info = self.con.execute(f"DESCRIBE SELECT * FROM {file_id}").fetchall()
@@ -68,9 +64,7 @@ class TabularTools:
         }
 
     def sample_rows(self, file_id: str, n: int = 10) -> list:
-        """Preview up to n real rows from a file (n is capped at 50).
-        Use this to check actual data values and formats (e.g. date format, casing, units)
-        before filtering or aggregating on a column - never assume a column's format."""
+        """Return up to n example rows from a file, to check real values before writing a query."""
         self._check_assigned(file_id)
         n = min(n, 50)
         result = self.con.execute(f"SELECT * FROM {file_id} LIMIT {n}")
@@ -78,9 +72,7 @@ class TabularTools:
         return [dict(zip(columns, row)) for row in result.fetchall()]
 
     def find_join_candidates(self, file_ids: list) -> list:
-        """Suggest likely join keys between 2+ files, by matching column names and checking
-        sample value overlap (match_confidence, 0-1). Call this before joining files together
-        in query_data, instead of guessing which columns line up."""
+        """Suggest likely join keys across the given files by name match plus sampled value overlap."""
         for file_id in file_ids:
             self._check_assigned(file_id)
 
@@ -115,19 +107,15 @@ class TabularTools:
         return candidates
 
     def query_data(self, sql: str, file_ids: list, row_cap: int = 500, timeout_seconds: int = 15) -> QueryResult:
-        """Run a raw SQL SELECT against assigned files (each file_id is a table name you can FROM/JOIN).
-        Use this for anything aggregate() can't express: custom filters, joins, subqueries, ordering.
-        Results are truncated to row_cap rows and the query is killed after timeout_seconds."""
+        """Run a SQL query against the given assigned files (each file_id is a queryable table name)."""
         for file_id in file_ids:
             self._check_assigned(file_id)
         result = run_query(self.con, sql, row_cap, timeout_seconds)
         return QueryResult(**result)
 
-    def aggregate(self, file_ids: list, group_by: list, metrics: list[MetricSpec], filters: Optional[dict] = None) -> QueryResult:
-        """Compute grouped sum/avg/count/min/max metrics without writing SQL - prefer this over
-        query_data for simple group-by aggregations. Each item in metrics needs: column (str),
-        op (one of sum|avg|count|min|max), alias (optional str, defaults to "{op}_{column}").
-        filters is an optional {column: value} dict for simple equality filtering."""
+    def aggregate(self, file_ids: list, group_by: list, metrics: list[MetricSpec], filters: dict = None) -> QueryResult:
+        """Group-by + sum/avg/count/min/max convenience wrapper over query_data.
+        Each item in metrics must have: column (str), op (one of sum|avg|count|min|max), alias (optional str)."""
         for file_id in file_ids:
             self._check_assigned(file_id)
 
@@ -157,9 +145,7 @@ class TabularTools:
         return MetricSpec(column=metric["column"], op=op, alias=metric.get("alias"))
 
     def describe_column(self, file_id: str, column: str) -> ColumnProfile:
-        """Get summary stats for one column: min, max, mean, null count, distinct count, and
-        the 10 most frequent values. Use this to understand a column's shape before deciding
-        how to filter, group, or aggregate on it."""
+        """Profile one column: min/max/mean, null count, distinct count, and top values."""
         self._check_assigned(file_id)
 
         row = self.con.execute(
@@ -180,11 +166,8 @@ class TabularTools:
             top_values=[(r[0], r[1]) for r in top],
         )
 
-    def validate_result(self, result: QueryResult, expected_shape: Optional[dict] = None) -> ValidationReport:
-        """Sanity-check a QueryResult before reporting it as a finding: flags 0-row results,
-        fewer rows than expected_shape's min_rows (optional {"min_rows": int}), and negative
-        values in revenue-like columns. Always call this on your final result before writing
-        the summary JSON."""
+    def validate_result(self, result: QueryResult, expected_shape: dict = None) -> ValidationReport:
+        """Sanity-check a query result: empty results, unexpected row counts, negative revenue-like values."""
         warnings = []
 
         if result.row_count == 0:

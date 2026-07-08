@@ -13,4 +13,5 @@ class IngestionResult:
     schema_summary: dict
     row_count: Optional[int] = None
     chunk_count: Optional[int] = None
+    extracted_tables: list = field(default_factory=list)
     errors: list = field(default_factory=list)
