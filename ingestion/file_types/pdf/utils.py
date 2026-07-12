@@ -6,11 +6,15 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 def convert_document(file_path: str) -> tuple:
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = False
+    pipeline_options.do_table_structure = False
+    pipeline_options.generate_picture_images = False
+    pipeline_options.generate_page_images = False
+    pipeline_options.images_scale = 0.5
 
     converter = DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
-    result = converter.convert(file_path)
+    result = converter.convert(file_path,page_range=(1,1))
     return result.document, _conversion_errors(result)
 
 
@@ -35,7 +39,7 @@ def is_scanned(document) -> bool:
     return len(text.strip()) < 20
 
 
-def extract_tables(document) -> list:
+def extract_tables(document, chunks: list = None) -> list:
     tables = []
     for index, table in enumerate(document.tables):
         try:
@@ -44,11 +48,12 @@ def extract_tables(document) -> list:
             continue
         if dataframe.empty:
             continue
+        page = _table_page(table)
         tables.append({
             "index": index,
             "dataframe": dataframe,
-            "page": _table_page(table),
-            "caption": _table_caption(table, document),
+            "page": page,
+            "caption": _infer_caption(table, document, chunks, page),
         })
     return tables
 
@@ -60,8 +65,36 @@ def _table_page(table) -> int:
         return 0
 
 
-def _table_caption(table, document) -> str:
+def _infer_caption(table, document, chunks: list, page: int) -> str:
+    """4-tier fallback: explicit docling caption -> nearby text snippet -> section title -> none."""
+    explicit = _explicit_caption(table, document)
+    if explicit:
+        return explicit
+
+    nearby = _nearest_chunk(chunks, page)
+    if nearby is None:
+        return f"Table on page {page}"
+
+    snippet = nearby.text.strip().splitlines()[0][:120] if nearby.text.strip() else ""
+    if snippet:
+        return snippet
+
+    if nearby.section:
+        return nearby.section
+
+    return f"Table on page {page}"
+
+
+def _explicit_caption(table, document) -> str:
     try:
         return table.caption_text(document) or ""
     except Exception:
         return ""
+
+
+def _nearest_chunk(chunks: list, page: int):
+    if not chunks:
+        return None
+    before = [c for c in chunks if c.page <= page]
+    pool = before or chunks
+    return max(pool, key=lambda c: c.page)

@@ -11,12 +11,21 @@ class PDFIngestor(BaseIngestor):
     def __init__(self, storage=None, vector_store=None, chunker: BaseChunker = None):
         super().__init__(storage=storage, vector_store=vector_store)
         self.chunker = chunker or DoclingChunker()
+        self.errors = []
 
     def validate(self, file_path: str) -> bool:
         try:
-            document, _ = convert_document(file_path)
-            return get_page_count(document) > 0
-        except Exception:
+            print("validating pdf...")
+            document, errors = convert_document(file_path)
+            self.errors = errors
+            if get_page_count(document) == 0:
+                self.errors = self.errors or ["docling produced a document with 0 pages"]
+                return False
+            return True
+        except Exception as exc:
+            print("exception in validation")
+            self.errors = [str(exc)]
+            print(self.errors)
             return False
 
     def extract_metadata(self, file_path: str) -> dict:
@@ -45,7 +54,7 @@ class PDFIngestor(BaseIngestor):
                 for chunk in chunks
             ]
 
-            extracted_tables, table_chunk_records = self._extract_tables(document, workspace_id, file_id, errors)
+            extracted_tables, table_chunk_records = self._extract_tables(document, chunks, workspace_id, file_id, errors)
 
             all_records = chunk_records + table_chunk_records
             if all_records:
@@ -73,8 +82,8 @@ class PDFIngestor(BaseIngestor):
                 errors=[str(exc)],
             )
 
-    def _extract_tables(self, document, workspace_id: str, file_id: str, errors: list) -> tuple:
-        tables = extract_tables(document)
+    def _extract_tables(self, document, chunks: list, workspace_id: str, file_id: str, errors: list) -> tuple:
+        tables = extract_tables(document, chunks)
         if not tables:
             return [], []
 
@@ -89,23 +98,30 @@ class PDFIngestor(BaseIngestor):
             dataframe = table["dataframe"]
             output_ref = self.storage.write(dataframe, f"{workspace_id}/{table_file_id}.parquet")
             columns = [str(c) for c in dataframe.columns]
+            row_count = len(dataframe)
 
             extracted_tables.append({
                 "file_id": table_file_id,
                 "output_ref": output_ref,
                 "page": table["page"],
-                "row_count": len(dataframe),
+                "row_count": row_count,
                 "columns": columns,
             })
 
-            caption = table["caption"] or f"Table on page {table['page']}"
+            caption = table["caption"]
             text = f"{caption}\nColumns: {', '.join(columns)}"
             table_chunk_records.append(ChunkRecord(
                 chunk_id=f"{table_file_id}_{uuid.uuid4().hex[:8]}",
                 file_id=file_id,
                 workspace_id=workspace_id,
                 text=text,
-                metadata={"page": table["page"], "type": "table", "table_ref": table_file_id},
+                metadata={
+                    "page": table["page"],
+                    "type": "table",
+                    "table_ref": table_file_id,
+                    "row_count": row_count,
+                    "columns": ", ".join(columns),
+                },
             ))
 
         return extracted_tables, table_chunk_records

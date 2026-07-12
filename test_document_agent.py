@@ -10,18 +10,13 @@ from vectordb.chroma_store import ChromaVectorStore
 from vectordb.reranker import CrossEncoderReranker
 
 QUESTIONS = [
-    "What is this document about? Give a high-level summary.",
-    "What are the main sections or topics covered in this document?",
-    "What are the most important facts, numbers, or conclusions mentioned in this document?",
-    "Does this document contain any tables? If so, what do they show?",
+    "Provide me the tables data of this file."
 ]
 
 
 def find_pdf() -> str:
-    print("finding pdf")
     root = os.path.dirname(os.path.abspath(__file__))
     pdfs = glob.glob(os.path.join(root, "*.pdf"))
-    print("found pdf")
     if not pdfs:
         raise FileNotFoundError("no .pdf file found in project root - add one and rerun")
     return pdfs[0]

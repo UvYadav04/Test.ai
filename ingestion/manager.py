@@ -25,13 +25,15 @@ class IngestionManager:
         ingestor = ingestor_cls(storage=self.storage, vector_store=self.vector_store)
 
         if not ingestor.validate(file_path):
+            print("validation error")
+            errors = getattr(ingestor, "errors", None) or ["validation failed"]
             return IngestionResult(
                 file_id=file_id,
                 workspace_id=workspace_id,
                 status="failed",
                 output_ref="",
                 schema_summary={},
-                errors=["validation failed"],
+                errors=errors,
             )
-
+        
         return ingestor.ingest(file_path, workspace_id, file_id)

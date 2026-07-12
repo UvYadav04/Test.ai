@@ -26,3 +26,20 @@ class ComparisonResult:
 class VerificationResult:
     supported: bool
     reasoning: str
+
+
+@dataclass
+class TableInfo:
+    table_ref: str
+    page: int
+    caption: str
+    columns: list
+    row_count: int
+
+
+@dataclass
+class FileOverview:
+    file_id: str
+    sections: list
+    tables: list
+    key_topics: list
