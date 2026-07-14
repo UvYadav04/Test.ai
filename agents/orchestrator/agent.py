@@ -12,12 +12,14 @@ from tools.orchestrator.orchestrator_tools import OrchestratorTools
 
 
 class OrchestratorAgent:
-    def __init__(self, catalog, vector_store=None, reranker=None, memory=None):
+    def __init__(self, catalog, vector_store=None, reranker=None, memory=None, storage=None):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
-        client = LLMProvider(model_config["provider"]).get_client(model_config["model"])
+        client = LLMProvider(model_config["provider"], fallback_provider="groq").get_client(model_config["model"])
 
-        self.tools = OrchestratorTools(catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory)
+        self.tools = OrchestratorTools(
+            catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage
+        )
 
         self.agent = AssistantAgent(
             name="orchestrator_agent",
@@ -34,10 +36,13 @@ class OrchestratorAgent:
                 self.tools.generate_hypotheses,
                 self.tools.invoke_tabular_agent,
                 self.tools.invoke_document_agent,
+                self.tools.generate_csv,
+                self.tools.generate_markdown_report,
+                self.tools.generate_dashboard,
             ],
             system_message=SYSTEM_MESSAGE,
             reflect_on_tool_use=False,
-            max_tool_iterations=15,
+            max_tool_iterations=25,
         )
 
         self.formatter = AssistantAgent(
@@ -51,6 +56,7 @@ class OrchestratorAgent:
         await self.formatter.on_reset(CancellationToken())
 
         constraints = constraints or {}
+        self.tools.workspace_id = workspace_id
         self.tools.state = InvestigationState(
             session_id=uuid.uuid4().hex[:12],
             objective=objective,

@@ -18,4 +18,5 @@ def build_client(model: str = None):
         api_key=settings.GEMINI_API_KEY,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         model_info=MODEL_INFO,
+        parallel_tool_calls=False,
     )

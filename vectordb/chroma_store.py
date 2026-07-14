@@ -44,7 +44,10 @@ class ChromaVectorStore(BaseVectorStore):
         return self._to_chunks(result, batched=False)
 
     def delete(self, ids: list) -> None:
-        self.collection.delete(ids=ids)
+        all_ids = self.collection.get().get("ids")
+        if not all_ids:
+            return
+        self.collection.delete(ids=all_ids)
 
     def _to_chunks(self, result: dict, batched: bool) -> list:
         ids = result["ids"][0] if batched else result["ids"]

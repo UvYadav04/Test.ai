@@ -18,4 +18,5 @@ def build_client(model: str = None):
         api_key=settings.GROQ_API_KEY,
         base_url="https://api.groq.com/openai/v1",
         model_info=MODEL_INFO,
+        parallel_tool_calls=False,
     )

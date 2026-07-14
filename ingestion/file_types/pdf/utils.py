@@ -6,7 +6,6 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 def convert_document(file_path: str) -> tuple:
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = False
-    pipeline_options.do_table_structure = False
     pipeline_options.generate_picture_images = False
     pipeline_options.generate_page_images = False
     pipeline_options.images_scale = 0.5
@@ -14,7 +13,7 @@ def convert_document(file_path: str) -> tuple:
     converter = DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
-    result = converter.convert(file_path,page_range=(1,1))
+    result = converter.convert(file_path,page_range=(1,5))
     return result.document, _conversion_errors(result)
 
 

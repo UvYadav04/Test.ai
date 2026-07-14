@@ -10,4 +10,5 @@ def build_client(model: str = None):
         api_key=settings.AZURE_OPENAI_API_KEY,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
         api_version=settings.get("AZURE_OPENAI_API_VERSION", "2024-06-01"),
+        parallel_tool_calls=False,
     )

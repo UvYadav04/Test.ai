@@ -11,9 +11,9 @@ from tools.tabular.tabular_tools import TabularTools
 
 
 class TabularAgent:
-    def __init__(self, assigned_files: list):
+    def __init__(self, assigned_files: list, storage=None, workspace_id: str = "default"):
         self.logger = get_agent_logger("tabular_agent")
-        self.tools = TabularTools(assigned_files)
+        self.tools = TabularTools(assigned_files, storage=storage, workspace_id=workspace_id)
         model_config = get_model_config()
         client = LLMProvider(model_config["provider"]).get_client(model_config["model"])
 
@@ -26,6 +26,7 @@ class TabularAgent:
                 self.tools.sample_rows,
                 self.tools.find_join_candidates,
                 self.tools.query_data,
+                self.tools.export_query,
                 self.tools.aggregate,
                 self.tools.describe_column,
                 self.tools.validate_result,
@@ -46,7 +47,14 @@ class TabularAgent:
         await self.formatter.on_reset(CancellationToken())
 
         constraints = constraints or {}
-        task = f"Objective: {objective}\nConstraints: {constraints}"
+        allowed_files = self.tools.list_allowed_files()
+        task = (
+            f"Objective: {objective}\n"
+            f"Assigned files - use these exact file_id/table_name values, do not guess or "
+            f"invent others, and you do not need to call list_allowed_files again unless you "
+            f"want to re-check them: {allowed_files}\n"
+            f"Constraints: {constraints}"
+        )
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []

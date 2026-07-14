@@ -20,7 +20,8 @@ aggregates, filters, computed answers) or invoke_document_agent (PDF/text conten
 facts, quotes, finding which tables exist in a document) - or both, if the objective needs both.
 Pass only assigned_files (file_id + output_ref) into these calls, never the full catalog entry -
 the subagent independently verifies its own files' structure, never trust a cached summary in
-its place.
+its place. Only use file_id, output_ref, table_ref, and workspace_id values a tool has actually
+returned to you - never invent or guess one, even as a placeholder.
 
 For complex or "why"-style questions, call generate_hypotheses first (with available_files from
 a list_files call) to prioritize investigation directions, then delegate to agents in priority
@@ -33,8 +34,27 @@ exists" as the final answer when the objective needs its actual values.
 If the user tells you something worth remembering beyond this conversation (a standing
 preference, a fact about their data), call store_user_info.
 
+If the user asks for a deliverable file - a CSV, a written report, or a dashboard - generate it
+BEFORE your final reply, using your own synthesized findings, not raw tool output:
+generate_csv for a CSV/spreadsheet request, generate_markdown_report for a written report/
+document, generate_dashboard for a visual dashboard. Each needs an output_ref, which comes from
+a table_ref in a Document Agent's artifact_refs, or from a Tabular Agent's export_query result -
+if the objective needs freshly computed data (not something already in a file), tell the
+Tabular Agent to use export_query, not query_data, so there is an output_ref to work with. If the
+deliverable needs data combined or joined across several files, that combining happens inside a
+single export_query call on the Tabular Agent (it can query across every file assigned to it),
+not by you concatenating multiple agents' outputs - so pass all the relevant files to one
+invoke_tabular_agent call. generate_dashboard also accepts multiple output_refs directly if you
+do need to chart several separate exports together.
+
+Every generate_csv/generate_markdown_report/generate_dashboard call creates a new folder (named
+after your `name` argument, under today's date) holding the deliverable plus a copy of every
+source data file it was built from, so each request's output is self-contained - pick a short,
+descriptive `name` for each one (e.g. "q3_revenue_by_region").
+
 Once you have enough evidence, stop calling tools and reply in plain language with your answer,
-citing what you found. Do not output JSON here - a separate step will format your answer.
+citing what you found and mentioning the path of any file you generated. Do not output JSON here
+- a separate step will format your answer.
 """
 
 FORMAT_SYSTEM_MESSAGE = """You are given a user's objective, the accumulated Investigation State
@@ -48,6 +68,10 @@ the delegated agents already found, don't just describe what was done.
 Set confidence honestly based on how complete and consistent the gathered evidence is - "low" if
 any delegated agent reported low confidence or real limitations, "high" only when the evidence is
 direct and consistent across everything gathered.
+
+If the transcript shows a generate_csv, generate_markdown_report, or generate_dashboard call
+that returned a file path, you MUST include that exact path in "artifact_refs" and mention it in
+"final_answer".
 
 Using only the objective, Investigation State, and transcript, reply with ONLY valid JSON in
 this exact shape, nothing else:

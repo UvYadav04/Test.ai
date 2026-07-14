@@ -16,7 +16,7 @@ class DocumentAgent:
     def __init__(self, assigned_files: list, vector_store=None, reranker=None):
         self.logger = get_agent_logger("document_agent")
         model_config = get_model_config()
-        provider = LLMProvider(model_config["provider"])
+        provider = LLMProvider(model_config["provider"], fallback_provider="groq")
         client = provider.get_client(model_config["model"])
 
         vector_store = vector_store or ChromaVectorStore()

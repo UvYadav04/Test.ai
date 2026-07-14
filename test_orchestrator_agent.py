@@ -37,16 +37,18 @@ async def main():
 
     csv_path = os.path.join(root,csvs[0])
 
-    # csv_manager = IngestionManager(storage=storage, vector_store=None)
-    # csv_result = csv_manager.ingest_file(csv_path, workspace_id="ws_test", file_id=csvs[0])
-    # print("csv ingestion status:", csv_result.status, csv_result.errors)
-    # assert csv_result.status == "success"
-    # for entry in entries_from_ingestion(csv_result, filename="employees.csv", file_type="csv"):
-        # catalog.add_entry(entry)
+    csv_manager = IngestionManager(storage=storage, vector_store=None)
+    csv_result = csv_manager.ingest_file(csv_path, workspace_id="ws_test", file_id=csvs[0])
+    print("csv ingestion status:", csv_result.status, csv_result.errors)
+    assert csv_result.status == "success"
+    for entry in entries_from_ingestion(csv_result, filename="employees.csv", file_type="csv"):
+        catalog.add_entry(entry)
 
     pdf_path = find_pdf(root,pdfs[0])
     pdf_file_id = os.path.splitext(os.path.basename(pdf_path))[0].replace(" ", "_")
     print("using pdf:", pdf_path)
+
+    # vector_store.delete(ids=[])
 
     existing = vector_store.get_by_filter({"file_id": pdf_file_id})
     if existing:
@@ -70,7 +72,7 @@ async def main():
     print("\ncatalog entries:", [e.file_id for e in catalog.all()])
 
     reranker = CrossEncoderReranker()
-    agent = OrchestratorAgent(catalog, vector_store=vector_store, reranker=reranker)
+    agent = OrchestratorAgent(catalog, vector_store=vector_store, reranker=reranker, storage=storage)
 
     while(True):
         input_ref = input("objective: ")

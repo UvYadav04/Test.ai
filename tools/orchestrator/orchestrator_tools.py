@@ -9,19 +9,23 @@ from tools.hypothesis.hypothesis_tools import HypothesisTools
 from tools.hypothesis.models import HypothesisResult
 from tools.orchestrator.memory import LongTermMemory
 from tools.orchestrator.models import FileRef, InvestigationEvent
+from tools.reporting.reporting_tools import ReportingTools
 from tools.tabular.models import FileRef as TabularFileRef
 from vectordb.chroma_store import ChromaVectorStore
 from vectordb.reranker import CrossEncoderReranker
 
 
 class OrchestratorTools:
-    def __init__(self, catalog, state, vector_store=None, reranker=None, memory=None):
+    def __init__(self, catalog, state, vector_store=None, reranker=None, memory=None, storage=None):
         self.catalog = catalog
         self.state = state
+        self.storage = storage
+        self.workspace_id = "default"
         self._vector_store = vector_store
         self._reranker = reranker
         self.memory = memory or LongTermMemory()
         self.hypothesis_tools = HypothesisTools()
+        self.reporting = ReportingTools(storage) if storage else None
 
     def list_files(self, workspace_id: str, filters: Optional[dict] = None, max_results: int = 20) -> list:
         """List files in the workspace matching a structured filter: name_contains, file_type
@@ -108,7 +112,7 @@ class OrchestratorTools:
         computed answers - including tables surfaced by the Document Agent via table_ref."""
         constraints = constraints or {}
         tabular_files = [self._to_tabular_file_ref(f) for f in assigned_files]
-        agent = TabularAgent(tabular_files)
+        agent = TabularAgent(tabular_files, storage=self.storage, workspace_id=self.workspace_id)
         result = await agent.run(objective, constraints)
         self._record_event("tabular", objective, result)
         return result
@@ -136,6 +140,48 @@ class OrchestratorTools:
         self._record_event("hypothesis", objective, result)
         self.state.open_questions = [h.statement for h in result.hypotheses]
         return result
+
+    def generate_csv(self, output_ref: str, name: Optional[str] = None) -> str:
+        """Convert an existing data artifact (an output_ref you got from a table_ref or from
+        a tabular agent's export_query artifact_ref) into a CSV file. Use this when the user
+        asks for a CSV/spreadsheet, not a written report or a dashboard. Creates a new folder
+        under today's date named after `name` (a short label for this request, e.g.
+        "q3_revenue_by_region") and writes the CSV there together with a copy of the source
+        data file, so the whole request's output lives in one place. Returns the CSV file path
+        - report it in your final answer and in artifact_refs."""
+        if self.reporting is None:
+            raise RuntimeError("no storage configured, cannot generate files")
+        return self.reporting.generate_csv(output_ref, name)
+
+    def generate_markdown_report(
+        self,
+        title: str,
+        objective: str,
+        summary: str,
+        findings: list,
+        open_questions: Optional[list] = None,
+        name: Optional[str] = None,
+    ) -> str:
+        """Build a markdown report file from your OWN synthesized investigation results - pass
+        your own summary and findings text (short strings you write), not raw tool output. Use
+        this when the user asks for a written report/document, not a CSV or dashboard. Creates a
+        new folder under today's date named after `name` (falls back to a slug of title) and
+        writes the report there. Returns the file path - report it in your final answer and in
+        artifact_refs."""
+        if self.reporting is None:
+            raise RuntimeError("no storage configured, cannot generate files")
+        return self.reporting.generate_markdown_report(title, objective, summary, findings, open_questions, name)
+
+    def generate_dashboard(self, title: str, output_refs: list, name: Optional[str] = None) -> str:
+        """Build a single-file HTML dashboard with charts from one or more existing data
+        artifacts (output_refs from table_refs or export_query). Use this when the user asks
+        for a dashboard or visualization, not a CSV or written report. Creates a new folder
+        under today's date named after `name` (falls back to a slug of title) and writes the
+        dashboard there together with copies of every source data file that fed it. Returns the
+        file path - report it in your final answer and in artifact_refs."""
+        if self.reporting is None:
+            raise RuntimeError("no storage configured, cannot generate files")
+        return self.reporting.generate_dashboard(title, output_refs, name)
 
     def _record_event(self, event_type: str, objective: str, result) -> None:
         event = InvestigationEvent(

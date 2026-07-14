@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import duckdb
@@ -7,8 +8,17 @@ def connect():
     return duckdb.connect(database=":memory:")
 
 
-def register_view(con, file_id: str, output_ref: str) -> None:
-    con.execute(f"CREATE OR REPLACE VIEW {file_id} AS SELECT * FROM read_parquet('{output_ref}')")
+def safe_view_name(file_id: str) -> str:
+    name = re.sub(r"[^0-9a-zA-Z_]", "_", file_id)
+    if not name or name[0].isdigit():
+        name = f"t_{name}"
+    return name
+
+
+def register_view(con, file_id: str, output_ref: str) -> str:
+    view_name = safe_view_name(file_id)
+    con.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{output_ref}')")
+    return view_name
 
 
 def run_query(con, sql: str, row_cap: int = 500, timeout_seconds: int = 15) -> dict:
