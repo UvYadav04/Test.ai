@@ -104,16 +104,53 @@ class OrchestratorTools:
         before."""
         return self.memory.recall_all()
 
-    async def invoke_tabular_agent(self, objective: str, assigned_files: list[FileRef], constraints: Optional[dict] = None):
+    async def invoke_tabular_agent(
+        self,
+        objective: str,
+        assigned_files: list[FileRef],
+        constraints: Optional[dict] = None,
+        must_export: bool = False,
+    ):
         """Delegate a data-analysis question to the Tabular Agent, scoped only to the given
         assigned_files (each {file_id, output_ref}). It runs its own DuckDB tool-calling loop
         in an isolated context and returns one compact TabularFindings - you never see its raw
         queries or intermediate results. Use for CSV/table data: aggregates, filters, joins,
-        computed answers - including tables surfaced by the Document Agent via table_ref."""
+        computed answers - including tables surfaced by the Document Agent via table_ref.
+
+        Set must_export=True whenever the result needs to persist afterward (the user asked for
+        a CSV, dashboard, or report) - this is enforced independently of how you word `objective`,
+        so it survives even if you have to reword the objective on a retry after a failure. When
+        True, this call raises instead of returning a fabricated or missing output_ref, so you
+        know to retry rather than silently passing a fake reference on to generate_csv/
+        generate_dashboard."""
         constraints = constraints or {}
         tabular_files = [self._to_tabular_file_ref(f) for f in assigned_files]
         agent = TabularAgent(tabular_files, storage=self.storage, workspace_id=self.workspace_id)
-        result = await agent.run(objective, constraints)
+
+        effective_objective = objective
+        if must_export:
+            effective_objective += (
+                "\n\nThis result MUST be persisted: your final computation must use "
+                "export_query (not query_data), and you must report its real output_ref "
+                "string in your findings' artifact_refs."
+            )
+
+        result = await agent.run(effective_objective, constraints)
+
+        if must_export:
+            valid_refs = [
+                ref for ref in result.artifact_refs
+                if isinstance(ref, str) and (".parquet" in ref or "/" in ref or "\\" in ref)
+            ]
+            if not valid_refs:
+                raise RuntimeError(
+                    "invoke_tabular_agent was called with must_export=True but the Tabular "
+                    "Agent did not return a real output_ref (it likely used query_data instead "
+                    "of export_query, or fabricated a placeholder artifact_ref). Retry with an "
+                    "objective that explicitly tells it to call export_query."
+                )
+            result.artifact_refs = valid_refs
+
         self._record_event("tabular", objective, result)
         return result
 

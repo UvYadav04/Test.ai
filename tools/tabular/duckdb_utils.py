@@ -22,6 +22,13 @@ def register_view(con, file_id: str, output_ref: str) -> str:
 
 
 def run_query(con, sql: str, row_cap: int = 500, timeout_seconds: int = 15) -> dict:
+    # Strip a trailing semicolon (and surrounding whitespace) - the query gets wrapped in an
+    # outer SELECT below, and any writer of ordinary, valid SQL will terminate a statement with
+    # ";" by habit. Without this, that ordinary style causes a hard parser error on the wrapper.
+    sql = sql.strip()
+    if sql.endswith(";"):
+        sql = sql[:-1].rstrip()
+
     def _run():
         total_rows = con.execute(f"SELECT COUNT(*) FROM ({sql}) AS _sub").fetchone()[0]
         result = con.execute(f"SELECT * FROM ({sql}) AS _sub LIMIT {row_cap}")

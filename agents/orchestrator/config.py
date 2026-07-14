@@ -65,6 +65,12 @@ Using the actual findings already gathered - not a description of what tools wer
 the real final answer to the objective. Be concrete: use the real numbers, facts, and citations
 the delegated agents already found, don't just describe what was done.
 
+If the transcript is empty (no tools were called), the objective was small talk or a general
+question that didn't need delegation - just answer it directly and naturally in "final_answer"
+with "confidence": "high". Never claim the request is "unclear" or invent an "open_questions"
+entry solely because the transcript has no tool activity - an empty transcript on its own is not
+evidence the objective was ambiguous.
+
 Set confidence honestly based on how complete and consistent the gathered evidence is - "low" if
 any delegated agent reported low confidence or real limitations, "high" only when the evidence is
 direct and consistent across everything gathered.

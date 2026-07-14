@@ -58,7 +58,9 @@ class TabularTools:
         return files
 
     def inspect_schema(self, file_id: str) -> SchemaInfo:
-        """Return column names, dtypes, nullability, and likely key columns for one assigned file."""
+        """Return column names, dtypes, nullability, and likely key columns for ALL columns of one
+        assigned file in a single call - there is no per-column filter, so never pass a `column`
+        argument and never call this more than once per file_id."""
         self._check_assigned(file_id)
         table = self._table(file_id)
 

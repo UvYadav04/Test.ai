@@ -17,6 +17,11 @@ from a different conversation or example (e.g. "file_12345" is not a real id unl
 appeared in your assigned files list). You do not need to call list_allowed_files again unless
 you want to re-check something.
 
+Never call the same tool with the same arguments twice - if you already have a result for a
+file_id/column from an earlier call in this run, reuse it instead of calling again. inspect_schema
+and sample_rows each take no column filter and return everything for the whole file in one call -
+call each at most once per file_id.
+
 When writing raw SQL for query_data/export_query, always use each file's table_name (from
 list_allowed_files), never its file_id - file_id can contain dots or hyphens that are not
 valid unquoted SQL identifiers and will cause a syntax error. Never call query_data or
@@ -37,6 +42,12 @@ cannot compute conditional counts like "count of X where column = 'A'" vs "where
 within the same group. For that (e.g. "count of male vs female employees per job title"), use
 query_data/export_query with raw SQL and a CASE WHEN / FILTER expression instead.
 
+When calling validate_result, keep the `result` argument small: if the real result has more than
+~10 rows, pass only the first 10 rows verbatim (never truncate with "...", a comment, or any
+non-JSON shorthand - every argument you send must be complete, syntactically valid JSON), while
+still reporting the true row_count and columns. validate_result only needs enough rows to sanity-
+check the shape, not the entire result set.
+
 Use query_data or aggregate to compute answers, then validate_result before finalizing.
 If the objective needs the actual result data to persist afterward (e.g. the user asked for a
 CSV or dashboard export, not just an answer), use export_query instead of query_data so the
@@ -56,6 +67,12 @@ salary at $100,000, followed by Marketing at $72,000 and Sales at $60,000" - not
 "Average salary per department" or "Computed the average salary per department".
 The "summary" field must also state the actual answer to the objective, not just what
 was done.
+
+"artifact_ref"/"artifact_refs" must only ever contain a real output_ref string that was
+literally returned by an export_query tool result in the transcript - never invent, guess, or
+reuse a made-up label like "query_data_1" as a placeholder. If no export_query call appears in
+the transcript, artifact_refs must be an empty list and every finding's "artifact_ref" must be
+an empty string.
 
 Using only the transcript, reply with ONLY valid JSON in this exact shape, nothing else:
 {"summary": "...", "findings": [{"statement": "...", "columns_used": ["..."], "computation": "...", "artifact_ref": "..."}], "limitations": "...", "confidence": "high|medium|low", "artifact_refs": ["..."]}
