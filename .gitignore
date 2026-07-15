@@ -11,3 +11,10 @@ data
 people-100.csv
 sec.gov_Archives_edgar_data_831001_000110465926042942_c-20260414xex99d1.htm.pdf
 startup_q2_revenue_report.pdf
+Customer_Churn_Modelling.csv
+Restaurant - Week 1 Sales.csv
+Restaurant - Week 2 Sales.csv
+revenue.csv
+tools/reporting/models.py
+logs/agents.log
+logs/*

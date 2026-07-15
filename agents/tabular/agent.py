@@ -26,7 +26,6 @@ class TabularAgent:
                 self.tools.sample_rows,
                 self.tools.find_join_candidates,
                 self.tools.query_data,
-                self.tools.export_query,
                 self.tools.aggregate,
                 self.tools.describe_column,
                 self.tools.validate_result,

@@ -22,11 +22,11 @@ file_id/column from an earlier call in this run, reuse it instead of calling aga
 and sample_rows each take no column filter and return everything for the whole file in one call -
 call each at most once per file_id.
 
-When writing raw SQL for query_data/export_query, always use each file's table_name (from
-list_allowed_files), never its file_id - file_id can contain dots or hyphens that are not
-valid unquoted SQL identifiers and will cause a syntax error. Never call query_data or
-export_query with an empty or placeholder `sql` string - only call them once you actually know
-the real table_name and column names to write a real query.
+When writing raw SQL for query_data, always use each file's table_name (from list_allowed_files),
+never its file_id - file_id can contain dots or hyphens that are not valid unquoted SQL
+identifiers and will cause a syntax error. Never call query_data with an empty or placeholder
+`sql` string - only call it once you actually know the real table_name and column names to write
+a real query.
 
 DuckDB SQL quoting: string literal VALUES use single quotes, e.g. WHERE "Sex" = 'Male' - never
 double quotes around a value, that's a syntax error. Column names use double quotes ONLY when
@@ -40,18 +40,17 @@ Use sample_rows to check real values before trusting a column's format. The `agg
 only supports one unconditional metric per group (sum/avg/count/min/max of a whole column) - it
 cannot compute conditional counts like "count of X where column = 'A'" vs "where column = 'B'"
 within the same group. For that (e.g. "count of male vs female employees per job title"), use
-query_data/export_query with raw SQL and a CASE WHEN / FILTER expression instead.
+query_data with raw SQL and a CASE WHEN / FILTER expression instead.
 
-When calling validate_result, keep the `result` argument small: if the real result has more than
-~10 rows, pass only the first 10 rows verbatim (never truncate with "...", a comment, or any
-non-JSON shorthand - every argument you send must be complete, syntactically valid JSON), while
-still reporting the true row_count and columns. validate_result only needs enough rows to sanity-
-check the shape, not the entire result set.
+query_data always returns only a small preview of a result plus the true row_count/columns -
+never the full result set - so you never need to worry about its size when passing it on to
+validate_result; just pass the result exactly as returned.
 
 Use query_data or aggregate to compute answers, then validate_result before finalizing.
 If the objective needs the actual result data to persist afterward (e.g. the user asked for a
-CSV or dashboard export, not just an answer), use export_query instead of query_data so the
-full result is saved, and report its output_ref in your findings' artifact_refs.
+CSV or dashboard export, not just an answer), call query_data with persist=True (and a short
+`name`) instead of the default persist=False, so the full result is saved, and report its
+output_ref in your findings' artifact_refs.
 
 Once validate_result passes, stop calling tools and reply in plain language summarizing
 what you found. Do not output JSON here - a separate step will format your answer.
@@ -69,10 +68,10 @@ The "summary" field must also state the actual answer to the objective, not just
 was done.
 
 "artifact_ref"/"artifact_refs" must only ever contain a real output_ref string that was
-literally returned by an export_query tool result in the transcript - never invent, guess, or
-reuse a made-up label like "query_data_1" as a placeholder. If no export_query call appears in
-the transcript, artifact_refs must be an empty list and every finding's "artifact_ref" must be
-an empty string.
+literally returned by a query_data(persist=True) tool result in the transcript - never invent,
+guess, or reuse a made-up label like "query_data_1" as a placeholder. If no query_data call in
+the transcript has a non-null output_ref, artifact_refs must be an empty list and every
+finding's "artifact_ref" must be an empty string.
 
 Using only the transcript, reply with ONLY valid JSON in this exact shape, nothing else:
 {"summary": "...", "findings": [{"statement": "...", "columns_used": ["..."], "computation": "...", "artifact_ref": "..."}], "limitations": "...", "confidence": "high|medium|low", "artifact_refs": ["..."]}

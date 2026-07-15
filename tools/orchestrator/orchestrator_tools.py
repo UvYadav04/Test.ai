@@ -9,6 +9,7 @@ from tools.hypothesis.hypothesis_tools import HypothesisTools
 from tools.hypothesis.models import HypothesisResult
 from tools.orchestrator.memory import LongTermMemory
 from tools.orchestrator.models import FileRef, InvestigationEvent
+from tools.reporting.models import ChartSpec
 from tools.reporting.reporting_tools import ReportingTools
 from tools.tabular.models import FileRef as TabularFileRef
 from vectordb.chroma_store import ChromaVectorStore
@@ -130,9 +131,9 @@ class OrchestratorTools:
         effective_objective = objective
         if must_export:
             effective_objective += (
-                "\n\nThis result MUST be persisted: your final computation must use "
-                "export_query (not query_data), and you must report its real output_ref "
-                "string in your findings' artifact_refs."
+                "\n\nThis result MUST be persisted: your final computation must call "
+                "query_data with persist=True (and a short name), and you must report its "
+                "real output_ref string in your findings' artifact_refs."
             )
 
         result = await agent.run(effective_objective, constraints)
@@ -145,9 +146,9 @@ class OrchestratorTools:
             if not valid_refs:
                 raise RuntimeError(
                     "invoke_tabular_agent was called with must_export=True but the Tabular "
-                    "Agent did not return a real output_ref (it likely used query_data instead "
-                    "of export_query, or fabricated a placeholder artifact_ref). Retry with an "
-                    "objective that explicitly tells it to call export_query."
+                    "Agent did not return a real output_ref (it likely called query_data with "
+                    "persist=False, or fabricated a placeholder artifact_ref). Retry with an "
+                    "objective that explicitly tells it to call query_data with persist=True."
                 )
             result.artifact_refs = valid_refs
 
@@ -180,7 +181,7 @@ class OrchestratorTools:
 
     def generate_csv(self, output_ref: str, name: Optional[str] = None) -> str:
         """Convert an existing data artifact (an output_ref you got from a table_ref or from
-        a tabular agent's export_query artifact_ref) into a CSV file. Use this when the user
+        a tabular agent's persisted-query artifact_ref) into a CSV file. Use this when the user
         asks for a CSV/spreadsheet, not a written report or a dashboard. Creates a new folder
         under today's date named after `name` (a short label for this request, e.g.
         "q3_revenue_by_region") and writes the CSV there together with a copy of the source
@@ -209,16 +210,40 @@ class OrchestratorTools:
             raise RuntimeError("no storage configured, cannot generate files")
         return self.reporting.generate_markdown_report(title, objective, summary, findings, open_questions, name)
 
-    def generate_dashboard(self, title: str, output_refs: list, name: Optional[str] = None) -> str:
+    def generate_dashboard(self, title: str, sections: list[ChartSpec], name: Optional[str] = None) -> str:
         """Build a single-file HTML dashboard with charts from one or more existing data
-        artifacts (output_refs from table_refs or export_query). Use this when the user asks
-        for a dashboard or visualization, not a CSV or written report. Creates a new folder
-        under today's date named after `name` (falls back to a slug of title) and writes the
-        dashboard there together with copies of every source data file that fed it. Returns the
-        file path - report it in your final answer and in artifact_refs."""
+        artifacts (output_refs from table_refs or a persisted query_data call). Use this when the
+        user asks for a dashboard or visualization, not a CSV or written report.
+
+        Each item in `sections` is a ChartSpec: {output_ref, chart_type, ...column names...}.
+        You never pass or see actual data values here - only an output_ref (a file path) and
+        column names you already know from a Tabular Agent's findings; the real numbers are
+        read straight from the parquet file when the dashboard is built.
+
+        chart_type options and which column names each needs:
+        - "bar" / "line": EITHER label_column + value_columns (1+ numeric series - omit both to
+          auto-pick the first non-numeric column and up to 5 numeric columns) OR, when the
+          result has TWO grouping columns and one metric (e.g. Age, Gender, Customer Count),
+          label_column + series_column + value_column - this produces one bar/line per distinct
+          series_column value grouped along label_column (e.g. label_column="Age",
+          series_column="Gender", value_column="Customer Count"). Use this whenever a Tabular
+          Agent's result has more than one grouping column - never pick just one and drop the
+          other.
+        - "timeline": time_column (required) plus EITHER value_columns (wide data - one series
+          per column) OR series_column + value_column (long/tidy data - one series per distinct
+          value in series_column, e.g. columns date, job_title, count ->
+          series_column="job_title", value_column="count").
+        - "scatter3d" / "surface": x_column, y_column, z_column (all required). "surface" needs
+          every (x, y) combination present in the data to build a valid grid - use "scatter3d"
+          instead if that can't be guaranteed.
+
+        Creates a new folder under today's date named after `name` (falls back to a slug of
+        title) and writes the dashboard there together with copies of every source data file
+        that fed it. Returns the file path - report it in your final answer and in
+        artifact_refs."""
         if self.reporting is None:
             raise RuntimeError("no storage configured, cannot generate files")
-        return self.reporting.generate_dashboard(title, output_refs, name)
+        return self.reporting.generate_dashboard(title, sections, name)
 
     def _record_event(self, event_type: str, objective: str, result) -> None:
         event = InvestigationEvent(

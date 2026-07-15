@@ -89,7 +89,7 @@ class TabularTools:
             "likely_key_columns": likely_keys,
         }
 
-    def sample_rows(self, file_id: str, n: int = 10) -> list:
+    def sample_rows(self, file_id: str, n: int = 5) -> list:
         """Return up to n example rows from a file, to check real values before writing a query."""
         self._check_assigned(file_id)
         n = min(n, 50)
@@ -134,38 +134,60 @@ class TabularTools:
                         })
         return candidates
 
-    def query_data(self, sql: str, file_ids: list, row_cap: int = 500, timeout_seconds: int = 15) -> QueryResult:
+    def query_data(
+        self,
+        sql: str,
+        file_ids: list,
+        persist: bool = False,
+        name: Optional[str] = None,
+        preview_rows: int = 10,
+        timeout_seconds: int = 15,
+    ) -> QueryResult:
         """Run a SQL query against the given assigned files. Write the SQL using each file's
         table_name (from list_allowed_files/inspect_schema), never its file_id - file_id can
-        contain characters (dots, hyphens) that are not valid unquoted SQL identifiers."""
+        contain characters (dots, hyphens) that are not valid unquoted SQL identifiers.
+
+        This always returns only a small preview of the result (up to preview_rows, capped at
+        20) plus the true row_count and columns - never the full result set - so raw row data
+        stays out of your context regardless of how many rows the query actually matches. If data
+        is more that capped rows, prepare a dashboard.
+
+        Set persist=True whenever the objective needs the actual computed data to exist
+        afterward (the user asked for this result as a CSV, dashboard, or report, not just an
+        answer in words) - this writes the FULL result (not just the preview) to a new Parquet
+        file and returns its path as output_ref, which you should report in your findings'
+        artifact_refs. When persist=True, also pass name: a short, descriptive label for what's
+        in the result (e.g. "revenue_by_region"). Leave persist=False when you only need to see
+        the result yourself to answer in words."""
         for file_id in file_ids:
             self._check_assigned(file_id)
-        result = run_query(self.con, sql, row_cap, timeout_seconds)
-        return QueryResult(**result)
+        preview_rows = max(1, min(preview_rows, 50))
 
-    def export_query(self, sql: str, file_ids: list, name: str) -> dict:
-        """Run a SQL query and persist the FULL result (not just a preview) as a new Parquet
-        file, for when the objective needs the actual computed data to exist afterward - e.g.
-        the user asked for this result as a CSV or dashboard, not just an answer in words.
-        Use query_data instead when you only need to see the result yourself. name should be a
-        short, descriptive label for what's in the result (e.g. "revenue_by_region"). Returns
-        output_ref, row_count, and columns - report output_ref in your findings' artifact_refs
-        so it can be exported later."""
-        for file_id in file_ids:
-            self._check_assigned(file_id)
-        if self.storage is None:
-            raise RuntimeError("no storage configured for this agent, cannot persist results")
+        if persist:
+            if self.storage is None:
+                raise RuntimeError("no storage configured for this agent, cannot persist results")
+            clean_sql = sql.strip()
+            if clean_sql.endswith(";"):
+                clean_sql = clean_sql[:-1].rstrip()
 
-        dataframe = self.con.execute(sql).df()
-        safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name)[:60] or "result"
-        result_id = f"{safe_name}_{uuid.uuid4().hex[:8]}"
-        output_ref = self.storage.write(dataframe, f"{self.workspace_id}/{result_id}.parquet")
+            dataframe = self.con.execute(clean_sql).df()
+            safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name or "result")[:60] or "result"
+            result_id = f"{safe_name}_{uuid.uuid4().hex[:8]}"
+            output_ref = self.storage.write(dataframe, f"{self.workspace_id}/{result_id}.parquet")
 
-        return {
-            "output_ref": output_ref,
-            "row_count": len(dataframe),
-            "columns": [str(c) for c in dataframe.columns],
-        }
+            row_count = len(dataframe)
+            preview = dataframe.head(preview_rows).to_dict(orient="records")
+            return QueryResult(
+                columns=[str(c) for c in dataframe.columns],
+                rows=preview,
+                row_count=row_count,
+                truncated=row_count > len(preview),
+                error=None,
+                output_ref=output_ref,
+            )
+
+        result = run_query(self.con, sql, preview_rows, timeout_seconds)
+        return QueryResult(**result, output_ref=None)
 
     def aggregate(self, file_ids: list, group_by: list, metrics: list[MetricSpec], filters: Optional[dict] = None) -> QueryResult:
         """Group-by + sum/avg/count/min/max convenience wrapper over query_data.
@@ -173,7 +195,7 @@ class TabularTools:
         Each metric applies its op to the WHOLE column within each group - there is no per-value
         condition. For "count of X where column = A" vs "where column = B" within the same
         group (e.g. male vs female counts per job title), this tool cannot express that; use
-        query_data/export_query with raw SQL (CASE WHEN ... END, or FILTER (WHERE ...)) instead."""
+        query_data with raw SQL (CASE WHEN ... END, or FILTER (WHERE ...)) instead."""
         for file_id in file_ids:
             self._check_assigned(file_id)
 

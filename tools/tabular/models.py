@@ -34,6 +34,7 @@ class QueryResult:
     row_count: int
     truncated: bool
     error: Optional[str] = None
+    output_ref: Optional[str] = None
 
 
 @dataclass

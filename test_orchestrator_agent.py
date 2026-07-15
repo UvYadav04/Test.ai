@@ -20,7 +20,7 @@ QUESTIONS = [
 
 
 pdfs=["sec.gov_Archives_edgar_data_831001_000110465926042942_c-20260414xex99d1.htm.pdf"]
-csvs=["people-100.csv"]
+csvs=["people-100.csv","Restaurant - Week 1 Sales.csv","Restaurant - Week 2 Sales.csv","Customer_Churn_Modelling.csv","revenue.csv"]
 
 def find_pdf(root: str,pdf:str) -> str:
     pdfs = glob.glob(os.path.join(root,pdf))
@@ -35,14 +35,15 @@ async def main():
     vector_store = ChromaVectorStore()
     catalog = FileCatalog()
 
-    csv_path = os.path.join(root,csvs[0])
+    for csv in csvs:
+        csv_path = os.path.join(root,csv)
 
-    csv_manager = IngestionManager(storage=storage, vector_store=None)
-    csv_result = csv_manager.ingest_file(csv_path, workspace_id="ws_test", file_id=csvs[0])
-    print("csv ingestion status:", csv_result.status, csv_result.errors)
-    assert csv_result.status == "success"
-    for entry in entries_from_ingestion(csv_result, filename="employees.csv", file_type="csv"):
-        catalog.add_entry(entry)
+        csv_manager = IngestionManager(storage=storage, vector_store=None)
+        csv_result = csv_manager.ingest_file(csv_path, workspace_id="ws_test", file_id=csv)
+        print("csv ingestion status:", csv_result.status, csv_result.errors)
+        assert csv_result.status == "success"
+        for entry in entries_from_ingestion(csv_result, filename=os.path.basename(csv_path), file_type="csv"):
+            catalog.add_entry(entry)
 
     pdf_path = find_pdf(root,pdfs[0])
     pdf_file_id = os.path.splitext(os.path.basename(pdf_path))[0].replace(" ", "_")

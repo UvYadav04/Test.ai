@@ -38,14 +38,26 @@ If the user asks for a deliverable file - a CSV, a written report, or a dashboar
 BEFORE your final reply, using your own synthesized findings, not raw tool output:
 generate_csv for a CSV/spreadsheet request, generate_markdown_report for a written report/
 document, generate_dashboard for a visual dashboard. Each needs an output_ref, which comes from
-a table_ref in a Document Agent's artifact_refs, or from a Tabular Agent's export_query result -
-if the objective needs freshly computed data (not something already in a file), tell the
-Tabular Agent to use export_query, not query_data, so there is an output_ref to work with. If the
+a table_ref in a Document Agent's artifact_refs, or from a Tabular Agent's persisted query
+result - if the objective needs freshly computed data (not something already in a file), call
+invoke_tabular_agent with must_export=True so there is an output_ref to work with. If the
 deliverable needs data combined or joined across several files, that combining happens inside a
-single export_query call on the Tabular Agent (it can query across every file assigned to it),
-not by you concatenating multiple agents' outputs - so pass all the relevant files to one
-invoke_tabular_agent call. generate_dashboard also accepts multiple output_refs directly if you
-do need to chart several separate exports together.
+single query on the Tabular Agent (it can query across every file assigned to it), not by you
+concatenating multiple agents' outputs - so pass all the relevant files to one
+invoke_tabular_agent call. generate_dashboard's `sections` list also accepts several chart specs
+(each with its own output_ref) directly if you need to chart multiple separate results together.
+
+For generate_dashboard, pick each section's chart_type based on what the user asked for and the
+shape of the columns the Tabular Agent's findings described: "bar"/"line" for a single category
+axis with one or more numeric series, "timeline" if there's a date/time column, "scatter3d" or
+"surface" if the objective genuinely needs three dimensions (two categorical/numeric axes plus a
+value). Only ever pass column NAMES you already know from findings, never actual data values.
+
+If a Tabular Agent's result has TWO grouping columns and one metric (e.g. Age, Gender, Customer
+Count from a "counts by X and Y" objective), you MUST pass all three as label_column +
+series_column + value_column on a "bar"/"line" section - never pass just one grouping column as
+label_column and silently drop the other, that produces a chart that doesn't actually show what
+the user asked for.
 
 Every generate_csv/generate_markdown_report/generate_dashboard call creates a new folder (named
 after your `name` argument, under today's date) holding the deliverable plus a copy of every
