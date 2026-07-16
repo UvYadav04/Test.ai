@@ -1,4 +1,4 @@
-import json
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -6,10 +6,12 @@ from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
 from agents.logger import get_agent_logger, log_event
-from agents.orchestrator.config import FORMAT_SYSTEM_MESSAGE, SYSTEM_MESSAGE, get_model_config
+from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
 from llm_provider import LLMProvider
 from tools.orchestrator.models import InvestigationState, OrchestratorResult
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
+
+_DELIVERABLE_TOOLS = {"generate_csv", "generate_markdown_report", "generate_dashboard"}
 
 
 class OrchestratorAgent:
@@ -46,15 +48,8 @@ class OrchestratorAgent:
             max_tool_iterations=25,
         )
 
-        self.formatter = AssistantAgent(
-            name="orchestrator_formatter",
-            model_client=client,
-            system_message=FORMAT_SYSTEM_MESSAGE,
-        )
-
     async def run(self, objective: str, workspace_id: str = "default", constraints: dict = None) -> OrchestratorResult:
         await self.agent.on_reset(CancellationToken())
-        await self.formatter.on_reset(CancellationToken())
 
         constraints = constraints or {}
         self.tools.workspace_id = workspace_id
@@ -73,23 +68,43 @@ class OrchestratorAgent:
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []
+        final_text = ""
         async for event in self.agent.run_stream(task=task):
             if not hasattr(event, "messages"):
                 log_event(self.logger, event)
                 line = self._transcript_line(event)
                 if line:
                     transcript.append(line)
+                if type(event).__name__ == "TextMessage" and event.source == self.agent.name:
+                    final_text = event.content
 
-        format_task = (
-            f"Objective: {objective}\n"
-            f"Investigation State:\n{self.tools.state.summary()}\n"
-            "Tool activity:\n" + "\n".join(transcript) +
-            "\nRespond with ONLY the final JSON now."
+        self.logger.info("final reply: %s", final_text)
+        return OrchestratorResult(
+            final_answer=final_text,
+            artifact_refs=self._collect_artifact_refs(transcript),
+            open_questions=self.tools.state.open_questions,
         )
-        format_result = await self.formatter.run(task=format_task)
-        raw = format_result.messages[-1].content
-        self.logger.info("final reply: %s", raw)
-        return self._parse(raw)
+
+    def _collect_artifact_refs(self, transcript: list) -> list:
+        """Real artifact paths only: whatever the delegated Tabular/Document agents already
+        reported (from their own tool results, not an LLM's transcription of them), plus any
+        deliverable file path a generate_csv/generate_markdown_report/generate_dashboard call
+        actually returned."""
+        refs = []
+        for event in self.tools.state.completed_tasks:
+            for ref in getattr(event.result, "artifact_refs", None) or []:
+                if ref not in refs:
+                    refs.append(ref)
+
+        pattern = re.compile(r"^RESULT (\w+) -> (.+)$")
+        for line in transcript:
+            for sub_line in line.split("\n"):
+                match = pattern.match(sub_line)
+                if match and match.group(1) in _DELIVERABLE_TOOLS:
+                    path = match.group(2).strip().strip("'\"")
+                    if path and path not in refs:
+                        refs.append(path)
+        return refs
 
     def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
         """Precompute what get_current_date/recall_user_info/list_files would return and hand
@@ -143,21 +158,3 @@ class OrchestratorAgent:
         if event_type == "ToolCallExecutionEvent":
             return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
         return ""
-
-    def _parse(self, raw: str) -> OrchestratorResult:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            self.logger.warning("agent did not return valid JSON")
-            return OrchestratorResult(
-                final_answer=raw,
-                confidence="low",
-                open_questions=self.tools.state.open_questions,
-            )
-
-        return OrchestratorResult(
-            final_answer=data.get("final_answer", ""),
-            confidence=data.get("confidence", "low"),
-            artifact_refs=data.get("artifact_refs", []),
-            open_questions=data.get("open_questions", self.tools.state.open_questions),
-        )

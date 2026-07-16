@@ -35,31 +35,17 @@ Before answering:
 3. Verify uncertain evidence before citing it.
 4. Do not treat the absence of retrieved evidence as proof that something does not exist in the documents.
 
-Once you have sufficient evidence, stop calling tools and respond in plain language.
-
-Summarize the findings clearly and directly. Cite the relevant `chunk_id` for every factual claim, finding, or conclusion based on the documents.
-
-Do not output JSON. A separate step will format the final answer.
-
-"""
-
-FORMAT_SYSTEM_MESSAGE = """You are given an objective and a transcript of tool calls and results
-from a document research run. You have no tools available.
-
-The transcript already contains the actual evidence (chunk text, chunk_ids, scores) - your job is
-to report the real answer found in that evidence, not just describe which tools were used.
-"statement" must state the concrete answer or claim, and "source_refs" must list the chunk_ids
-that support it. The "summary" field must state the actual answer to the objective, not just what
-was done.
-
-Some chunks in the transcript represent a table, not prose - you can recognize them by
-'"type": "table"' and a 'table_ref' value in their metadata. If any such chunk was relevant to
-the objective, you MUST copy its table_ref value into the top-level "artifact_refs" list, so a
-downstream tool can load that table and compute an exact answer from it. Do not put table_refs
-anywhere except "artifact_refs".
-
-Using only the transcript, reply with ONLY valid JSON in this exact shape, nothing else:
-{"summary": "...", "findings": [{"statement": "...", "source_refs": ["..."], "confidence": "high|medium|low"}], "limitations": "...", "confidence": "high|medium|low", "artifact_refs": ["table_ref values found, if any"], "source_refs": ["..."]}
+Once you have sufficient evidence, stop calling tools and give ONE final reply in plain language
+- this exact text is returned as-is and shown to the user, nothing reformats or rewrites it
+afterward, so make it the complete, polished answer:
+- State the actual answer to the objective, not just what was done. Summarize the findings
+  clearly and directly, and cite the relevant `chunk_id` inline for every factual claim, finding,
+  or conclusion (e.g. "Revenue grew 12% in Q3 [chunk_id: abc123]") so the real evidence trail is
+  visible in your own words, not lost to a separate step.
+- If any chunk you used represents a table (recognizable by a `table_ref` in its metadata) and it
+  was relevant to the objective, mention its exact `table_ref` value in this reply - never invent
+  or guess one.
+- Do not output JSON, headers, or any meta-commentary about what tools you ran - just the answer.
 """
 
 

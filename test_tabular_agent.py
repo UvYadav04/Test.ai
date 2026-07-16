@@ -57,9 +57,7 @@ async def main():
             findings = await agent.run(objective=question)
 
             print("\nsummary:", findings.summary)
-            print("findings:", findings.findings)
-            print("limitations:", findings.limitations)
-            print("confidence:", findings.confidence)
+            print("artifact_refs:", findings.artifact_refs)
 
 
 if __name__ == "__main__":

@@ -21,10 +21,11 @@ skip file-discovery tool calls entirely for that file.
 For simple, direct questions, delegate straight to invoke_tabular_agent (CSV/table data:
 aggregates, filters, computed answers) or invoke_document_agent (PDF/text content: summaries,
 facts, quotes, finding which tables exist in a document) - or both, if the objective needs both.
-Pass only assigned_files (file_id + output_ref) into these calls, never the full catalog entry -
-the subagent independently verifies its own files' structure, never trust a cached summary in
-its place. Only use file_id, output_ref, table_ref, and workspace_id values a tool has actually
-returned to you - never invent or guess one, even as a placeholder.
+Pass only assigned_files (each just a file_id) into these calls, never the full catalog entry -
+the orchestrator resolves the real output_ref from the catalog itself, and the subagent
+independently verifies its own files' structure, so never guess or pass an output_ref yourself.
+Only use file_id, table_ref, and workspace_id values a tool has actually returned to you - never
+invent or guess one, even as a placeholder.
 
 For complex or "why"-style questions, call generate_hypotheses first (with available_files from
 a list_files call) to prioritize investigation directions, then delegate to agents in priority
@@ -67,36 +68,20 @@ after your `name` argument, under today's date) holding the deliverable plus a c
 source data file it was built from, so each request's output is self-contained - pick a short,
 descriptive `name` for each one (e.g. "q3_revenue_by_region").
 
-Once you have enough evidence, stop calling tools and reply in plain language with your answer,
-citing what you found and mentioning the path of any file you generated. Do not output JSON here
-- a separate step will format your answer.
-"""
-
-FORMAT_SYSTEM_MESSAGE = """You are given a user's objective, the accumulated Investigation State
-summary, and a transcript of tool calls/results from an orchestration run. You have no tools
-available.
-
-Using the actual findings already gathered - not a description of what tools were called - write
-the real final answer to the objective. Be concrete: use the real numbers, facts, and citations
-the delegated agents already found, don't just describe what was done.
-
-If the transcript is empty (no tools were called), the objective was small talk or a general
-question that didn't need delegation - just answer it directly and naturally in "final_answer"
-with "confidence": "high". Never claim the request is "unclear" or invent an "open_questions"
-entry solely because the transcript has no tool activity - an empty transcript on its own is not
-evidence the objective was ambiguous.
-
-Set confidence honestly based on how complete and consistent the gathered evidence is - "low" if
-any delegated agent reported low confidence or real limitations, "high" only when the evidence is
-direct and consistent across everything gathered.
-
-If the transcript shows a generate_csv, generate_markdown_report, or generate_dashboard call
-that returned a file path, you MUST include that exact path in "artifact_refs" and mention it in
-"final_answer".
-
-Using only the objective, Investigation State, and transcript, reply with ONLY valid JSON in
-this exact shape, nothing else:
-{"final_answer": "...", "confidence": "high|medium|low", "artifact_refs": ["..."], "open_questions": ["..."]}
+Once you have enough evidence (or immediately, if the objective is just small talk or a general
+question that needs no delegation), stop calling tools and give ONE final reply in plain
+language - this exact text is returned as-is and shown to the user, nothing reformats or
+rewrites it afterward, so make it the complete, polished answer:
+- Be concrete: use the real numbers, facts, and citations the delegated agents already found,
+  don't just describe what was done.
+- Cite numbers sparingly - a handful of headline figures, never a full row-by-row reproduction
+  of a delegated agent's data (a table with every group/category/region broken out). If a
+  finding covers more than roughly 15-25 rows/groups, summarize with highlights and point the
+  user to the generated file (CSV/dashboard/report) for the full breakdown instead of
+  reproducing it as a table in your reply.
+- If you called generate_csv/generate_markdown_report/generate_dashboard, mention the exact file
+  path it returned - never invent or guess one.
+- Do not output JSON, headers, or any meta-commentary about what tools you ran - just the answer.
 """
 
 

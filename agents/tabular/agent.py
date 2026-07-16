@@ -1,10 +1,10 @@
-import json
+import re
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
 from agents.logger import get_agent_logger, log_event
-from agents.tabular.config import FORMAT_SYSTEM_MESSAGE, SYSTEM_MESSAGE, get_model_config
+from agents.tabular.config import SYSTEM_MESSAGE, get_model_config
 from llm_provider import LLMProvider
 from tools.orchestrator.models import TabularFindings
 from tools.tabular.tabular_tools import TabularTools
@@ -29,15 +29,8 @@ class TabularAgent:
             max_tool_iterations=10,
         )
 
-        self.formatter = AssistantAgent(
-            name="tabular_formatter",
-            model_client=client,
-            system_message=FORMAT_SYSTEM_MESSAGE,
-        )
-
     async def run(self, objective: str, constraints: dict = None) -> TabularFindings:
         await self.agent.on_reset(CancellationToken())
-        await self.formatter.on_reset(CancellationToken())
 
         constraints = constraints or {}
         allowed_files = self.tools.list_allowed_files()
@@ -51,22 +44,21 @@ class TabularAgent:
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []
+        final_text = ""
         async for event in self.agent.run_stream(task=task):
             if not hasattr(event, "messages"):
                 log_event(self.logger, event)
                 line = self._transcript_line(event)
                 if line:
                     transcript.append(line)
+                if type(event).__name__ == "TextMessage" and event.source == self.agent.name:
+                    final_text = event.content
 
-        format_task = (
-            f"Objective: {objective}\n"
-            "Tool activity:\n" + "\n".join(transcript) +
-            "\nRespond with ONLY the final JSON now."
+        self.logger.info("final reply: %s", final_text)
+        return TabularFindings(
+            summary=final_text,
+            artifact_refs=self._extract_refs(transcript, "output_ref"),
         )
-        format_result = await self.formatter.run(task=format_task)
-        raw = format_result.messages[-1].content
-        self.logger.info("final reply: %s", raw)
-        return self._parse(raw)
 
     @staticmethod
     def _transcript_line(event) -> str:
@@ -77,22 +69,16 @@ class TabularAgent:
             return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
         return ""
 
-    def _parse(self, raw: str) -> TabularFindings:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            self.logger.warning("agent did not return valid JSON")
-            return TabularFindings(
-                summary=raw,
-                findings=[],
-                limitations="agent did not return valid JSON",
-                confidence="low",
-            )
-
-        return TabularFindings(
-            summary=data.get("summary", ""),
-            findings=data.get("findings", []),
-            limitations=data.get("limitations", ""),
-            confidence=data.get("confidence", "low"),
-            artifact_refs=data.get("artifact_refs", []),
-        )
+    @staticmethod
+    def _extract_refs(transcript: list, key: str) -> list:
+        """Pull real output_ref paths straight out of tool results (e.g. run_python's
+        save() entries) instead of trusting an LLM to transcribe them - the sandbox already
+        returns the exact path, so re-deriving it from a second model call is both an extra
+        round trip and a chance to hallucinate or drop it."""
+        text = "\n".join(transcript)
+        pattern = rf"['\"]{re.escape(key)}['\"]\s*:\s*['\"]([^'\"]+)['\"]"
+        refs = []
+        for match in re.findall(pattern, text):
+            if match and match not in refs:
+                refs.append(match)
+        return refs

@@ -43,7 +43,7 @@ async def main():
         print("extracted tables:", result.extracted_tables)
         assert result.status in ("success", "partial")
 
-    assigned_files = [FileRef(file_id=file_id, output_ref="")]
+    assigned_files = [FileRef(file_id=file_id)]
     reranker = CrossEncoderReranker()
     agent = DocumentAgent(assigned_files, vector_store=vector_store, reranker=reranker)
 
@@ -53,9 +53,6 @@ async def main():
         findings = await agent.run(objective=question)
 
         print("\nsummary:", findings.summary)
-        print("findings:", findings.findings)
-        print("limitations:", findings.limitations)
-        print("confidence:", findings.confidence)
         print("source_refs:", findings.source_refs)
         print("artifact_refs (table_refs, if any):", findings.artifact_refs)
 

@@ -202,7 +202,7 @@ class TabularTools:
         the result yourself to answer in words."""
         for file_id in file_ids:
             self._check_assigned(file_id)
-        preview_rows = max(1, min(preview_rows, 50))
+        preview_rows = max(1, min(preview_rows, 20))
 
         if persist:
             if self.storage is None:
@@ -230,15 +230,29 @@ class TabularTools:
         result = run_query(self.con, sql, preview_rows, timeout_seconds)
         return QueryResult(**result, output_ref=None)
 
-    def aggregate(self, file_ids: list, group_by: list, metrics: list[MetricSpec], filters: Optional[dict] = None) -> QueryResult:
+    def aggregate(
+        self,
+        file_ids: list,
+        group_by: list,
+        metrics: list[MetricSpec],
+        filters: Optional[dict] = None,
+        name: Optional[str] = None,
+    ) -> QueryResult:
         """Group-by + sum/avg/count/min/max convenience wrapper over query_data.
         Each item in metrics must have: column (str), op (one of sum|avg|count|min|max), alias (optional str).
         Each metric applies its op to the WHOLE column within each group - there is no per-value
         condition. For "count of X where column = A" vs "where column = B" within the same
         group (e.g. male vs female counts per job title), this tool cannot express that; use
-        query_data with raw SQL (CASE WHEN ... END, or FILTER (WHERE ...)) instead."""
+        query_data with raw SQL (CASE WHEN ... END, or FILTER (WHERE ...)) instead.
+
+        Always persists the FULL aggregated result to a new Parquet file and returns only a
+        capped preview (up to 20 rows) plus output_ref, row_count, and truncated - never the
+        whole result set, regardless of how many groups it has. Pass `name`: a short label for
+        what's in the result (e.g. "revenue_by_region")."""
         for file_id in file_ids:
             self._check_assigned(file_id)
+        if self.storage is None:
+            raise RuntimeError("no storage configured for this agent, cannot persist results")
 
         select_parts = [self._quote_ident(col) for col in group_by]
         for raw_metric in metrics:
@@ -257,8 +271,21 @@ class TabularTools:
         if group_by:
             sql += f" GROUP BY {', '.join(self._quote_ident(col) for col in group_by)}"
 
-        result = run_query(self.con, sql, row_cap=500, timeout_seconds=15)
-        return QueryResult(**result)
+        dataframe = self.con.execute(sql).df()
+        safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name or "aggregate")[:60] or "aggregate"
+        result_id = f"{safe_name}_{uuid.uuid4().hex[:8]}"
+        output_ref = self.storage.write(dataframe, f"{self.workspace_id}/{result_id}.parquet")
+
+        row_count = len(dataframe)
+        preview = dataframe.head(20).to_dict(orient="records")
+        return QueryResult(
+            columns=[str(c) for c in dataframe.columns],
+            rows=preview,
+            row_count=row_count,
+            truncated=row_count > len(preview),
+            error=None,
+            output_ref=output_ref,
+        )
 
     @staticmethod
     def _to_metric(metric) -> MetricSpec:

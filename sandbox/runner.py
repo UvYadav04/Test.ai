@@ -18,7 +18,7 @@ MANIFEST_PATH = "/job/manifest.json"
 RESULT_PATH = "/job/result.json"
 OUTPUT_ROOT = "/data"
 PREVIEW_CAP = 20
-MAX_STDOUT_CHARS = 4000
+MAX_STDOUT_CHARS = 500
 
 
 def main():
