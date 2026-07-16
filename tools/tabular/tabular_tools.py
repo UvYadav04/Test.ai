@@ -12,6 +12,7 @@ from tools.tabular.models import (
     SchemaInfo,
     ValidationReport,
 )
+from tools.tabular.sandbox_executor import PythonSandbox, SandboxExecutionError
 
 
 class TabularTools:
@@ -23,6 +24,9 @@ class TabularTools:
         self.table_names = {}
         for file_ref in assigned_files:
             self.table_names[file_ref.file_id] = register_view(self.con, file_ref.file_id, file_ref.output_ref)
+
+        root_dir = getattr(storage, "root_dir", None)
+        self._sandbox = PythonSandbox(root_dir) if root_dir else None
 
     def _check_assigned(self, file_id: str) -> None:
         if file_id not in self.assigned_files:
@@ -40,8 +44,9 @@ class TabularTools:
 
     def list_allowed_files(self) -> list:
         """Return metadata (row count, columns, queryable table_name) for every file assigned to
-        this agent. file_id may contain characters invalid in SQL (dots, hyphens) - always use
-        table_name, not file_id, inside raw SQL you write for query_data."""
+        this agent. Use table_name (not file_id) to refer to a file inside run_python's dfs
+        dict and sql() calls - file_id may contain characters (dots, hyphens) that aren't valid
+        identifiers."""
         files = []
         for file_id, file_ref in self.assigned_files.items():
             table = self._table(file_id)
@@ -56,6 +61,42 @@ class TabularTools:
                 "columns": columns,
             })
         return files
+
+    def run_python(self, code: str, file_ids: list) -> dict:
+        """Execute pandas/DuckDB Python code in an isolated Docker sandbox (no network access,
+        capped memory/CPU, hard timeout) against the given assigned files. This is the primary
+        way to explore, aggregate, and persist data - DuckDB SQL is also available inside via
+        sql(query) if that's easier for a particular join/aggregation.
+
+        Inside `code`, these are available - nothing else (no imports, no filesystem/network
+        access beyond them):
+        - dfs: dict of {table_name: DataFrame}, one entry per file_id in file_ids, already
+          loaded. Use each file's table_name from list_allowed_files, not its file_id.
+        - describe(df) -> {columns, dtypes, shape, null_counts} - schema/shape only, never rows.
+        - preview(df, n=10) -> up to n rows (hard-capped at 50) as a list of dicts - use this
+          instead of print(df) to look at real values.
+        - sql(query) -> DataFrame - run a DuckDB SQL query over the tables in `dfs`, registered
+          under their table_name.
+        - save(df, name="result") -> output_ref (str) - persists the FULL DataFrame to a new
+          Parquet file and returns its path. Call this whenever the objective needs the result
+          to exist afterward (CSV/dashboard/report), and report the returned output_ref in your
+          findings' artifact_refs. Only a small preview of what you saved is ever returned here
+          - never the full data.
+
+        Whatever your code prints via plain print() is captured but hard-truncated - prefer
+        preview()/describe() over raw print() for anything beyond a couple of values.
+
+        Returns {stdout (possibly truncated), saved: [{output_ref, row_count, columns, preview},
+        ...] - one entry per save() call, error: traceback string or null}."""
+        if self._sandbox is None:
+            raise RuntimeError("no storage configured for this agent, cannot run the sandbox")
+        for file_id in file_ids:
+            self._check_assigned(file_id)
+        tables = {self._table(fid): self.assigned_files[fid].output_ref for fid in file_ids}
+        try:
+            return self._sandbox.run(code, tables, self.workspace_id)
+        except SandboxExecutionError as exc:
+            return {"stdout": "", "saved": [], "error": str(exc)}
 
     def inspect_schema(self, file_id: str) -> SchemaInfo:
         """Return column names, dtypes, nullability, and likely key columns for ALL columns of one

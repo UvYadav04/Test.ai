@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import datetime, timezone
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
@@ -63,7 +64,12 @@ class OrchestratorAgent:
             constraints=constraints,
         )
 
-        task = f"Objective: {objective}\nWorkspace: {workspace_id}\nConstraints: {constraints}"
+        task = (
+            f"Objective: {objective}\n"
+            f"Workspace: {workspace_id}\n"
+            f"Constraints: {constraints}\n\n"
+            f"{self._context_brief()}"
+        )
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []
@@ -84,6 +90,50 @@ class OrchestratorAgent:
         raw = format_result.messages[-1].content
         self.logger.info("final reply: %s", raw)
         return self._parse(raw)
+
+    def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
+        """Precompute what get_current_date/recall_user_info/list_files would return and hand
+        it to the agent directly in the task message, instead of making it spend its first 2-4
+        tool calls (each a full model round trip) re-fetching things we already know here for
+        free. The agent still has all these tools available for anything beyond this - a fuzzy
+        name match, a workspace with more files than shown, or re-checking something mid-run."""
+        now = datetime.now(timezone.utc)
+        lines = [f"Today's date: {now.date().isoformat()} ({now.strftime('%A')}, UTC)."]
+
+        user_info = self.tools.memory.recall_all()
+        if user_info:
+            lines.append("Known standing user preferences/facts (from recall_user_info):")
+            lines.extend(f"- {fact}" for fact in user_info)
+        else:
+            lines.append("No standing user preferences/facts saved yet.")
+
+        entries = self.tools.catalog.all()
+        if not entries:
+            lines.append("Workspace files: none uploaded yet.")
+        else:
+            shown = entries[:max_files]
+            lines.append(f"Workspace files ({len(entries)} total, from list_files):")
+            for e in shown:
+                detail = f"- {e.filename} [file_id={e.file_id}, type={e.file_type}"
+                if e.row_count is not None:
+                    detail += f", {e.row_count} rows"
+                if e.page_count is not None:
+                    detail += f", {e.page_count} pages"
+                detail += "]"
+                if e.columns:
+                    cols = e.columns[:max_columns]
+                    col_str = ", ".join(cols)
+                    if len(e.columns) > max_columns:
+                        col_str += f", ... (+{len(e.columns) - max_columns} more)"
+                    detail += f" columns: {col_str}"
+                lines.append(detail)
+            if len(entries) > max_files:
+                lines.append(
+                    f"... and {len(entries) - max_files} more files not shown here - call "
+                    "list_files/search_files if you need to see them."
+                )
+
+        return "\n".join(lines)
 
     @staticmethod
     def _transcript_line(event) -> str:

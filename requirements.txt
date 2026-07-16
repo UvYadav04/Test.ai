@@ -1,6 +1,7 @@
 pandas
 pyarrow
 duckdb
+docker
 chromadb
 docling
 sentence-transformers

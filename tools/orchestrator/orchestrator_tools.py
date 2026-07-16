@@ -113,10 +113,11 @@ class OrchestratorTools:
         must_export: bool = False,
     ):
         """Delegate a data-analysis question to the Tabular Agent, scoped only to the given
-        assigned_files (each {file_id, output_ref}). It runs its own DuckDB tool-calling loop
-        in an isolated context and returns one compact TabularFindings - you never see its raw
-        queries or intermediate results. Use for CSV/table data: aggregates, filters, joins,
-        computed answers - including tables surfaced by the Document Agent via table_ref.
+        assigned_files (each {file_id, output_ref}). It runs its own sandboxed Python/DuckDB
+        tool-calling loop in an isolated context and returns one compact TabularFindings - you
+        never see its raw code, intermediate output, or the underlying data. Use for CSV/table
+        data: aggregates, filters, joins, computed answers - including tables surfaced by the
+        Document Agent via table_ref.
 
         Set must_export=True whenever the result needs to persist afterward (the user asked for
         a CSV, dashboard, or report) - this is enforced independently of how you word `objective`,
@@ -132,8 +133,8 @@ class OrchestratorTools:
         if must_export:
             effective_objective += (
                 "\n\nThis result MUST be persisted: your final computation must call "
-                "query_data with persist=True (and a short name), and you must report its "
-                "real output_ref string in your findings' artifact_refs."
+                "save(df, name) inside run_python, and you must report its real output_ref "
+                "string in your findings' artifact_refs."
             )
 
         result = await agent.run(effective_objective, constraints)
@@ -146,9 +147,9 @@ class OrchestratorTools:
             if not valid_refs:
                 raise RuntimeError(
                     "invoke_tabular_agent was called with must_export=True but the Tabular "
-                    "Agent did not return a real output_ref (it likely called query_data with "
-                    "persist=False, or fabricated a placeholder artifact_ref). Retry with an "
-                    "objective that explicitly tells it to call query_data with persist=True."
+                    "Agent did not return a real output_ref (it likely never called save(), or "
+                    "fabricated a placeholder artifact_ref). Retry with an objective that "
+                    "explicitly tells it to call save(df, name) inside run_python."
                 )
             result.artifact_refs = valid_refs
 
@@ -212,8 +213,8 @@ class OrchestratorTools:
 
     def generate_dashboard(self, title: str, sections: list[ChartSpec], name: Optional[str] = None) -> str:
         """Build a single-file HTML dashboard with charts from one or more existing data
-        artifacts (output_refs from table_refs or a persisted query_data call). Use this when the
-        user asks for a dashboard or visualization, not a CSV or written report.
+        artifacts (output_refs from table_refs or a persisted run_python save() call). Use this
+        when the user asks for a dashboard or visualization, not a CSV or written report.
 
         Each item in `sections` is a ChartSpec: {output_ref, chart_type, ...column names...}.
         You never pass or see actual data values here - only an output_ref (a file path) and
@@ -221,14 +222,13 @@ class OrchestratorTools:
         read straight from the parquet file when the dashboard is built.
 
         chart_type options and which column names each needs:
-        - "bar" / "line": EITHER label_column + value_columns (1+ numeric series - omit both to
-          auto-pick the first non-numeric column and up to 5 numeric columns) OR, when the
-          result has TWO grouping columns and one metric (e.g. Age, Gender, Customer Count),
-          label_column + series_column + value_column - this produces one bar/line per distinct
-          series_column value grouped along label_column (e.g. label_column="Age",
-          series_column="Gender", value_column="Customer Count"). Use this whenever a Tabular
-          Agent's result has more than one grouping column - never pick just one and drop the
-          other.
+        - "bar" / "line": EITHER label_column + value_columns (1+ numeric series - if omitted,
+          the first non-numeric column and up to 5 numeric columns are used automatically) OR,
+          when the result has TWO grouping columns and one metric (e.g. Age, Gender, Customer
+          Count), label_column + series_column + value_column - this produces one bar/line per
+          distinct series_column value grouped along label_column. Use this whenever a Tabular
+          Agent's result has more than one grouping column - never pass just one grouping
+          column as label_column and silently drop the other.
         - "timeline": time_column (required) plus EITHER value_columns (wide data - one series
           per column) OR series_column + value_column (long/tidy data - one series per distinct
           value in series_column, e.g. columns date, job_title, count ->
