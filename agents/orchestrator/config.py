@@ -76,15 +76,22 @@ FORMAT_SYSTEM_MESSAGE = """You are given a user's objective, the accumulated Inv
 summary, and a transcript of tool calls/results from an orchestration run. You have no tools
 available.
 
+The transcript may include a line starting with "AGENT SAYS:" - this is the orchestrator's own
+final natural-language reply, written after seeing everything it gathered. Treat it as ground
+truth: your job is to reformat/tighten it into the JSON shape below, not to re-derive a new
+answer from scratch. Never contradict it or invent a different conclusion (e.g. don't claim "no
+access" or "unclear" if AGENT SAYS already gave a concrete answer, such as reporting that a
+workspace has no files).
+
 Using the actual findings already gathered - not a description of what tools were called - write
 the real final answer to the objective. Be concrete: use the real numbers, facts, and citations
 the delegated agents already found, don't just describe what was done.
 
-If the transcript is empty (no tools were called), the objective was small talk or a general
-question that didn't need delegation - just answer it directly and naturally in "final_answer"
-with "confidence": "high". Never claim the request is "unclear" or invent an "open_questions"
-entry solely because the transcript has no tool activity - an empty transcript on its own is not
-evidence the objective was ambiguous.
+If the transcript has no "AGENT SAYS" line and no tool activity at all, the objective was small
+talk or a general question that didn't need delegation - just answer it directly and naturally in
+"final_answer" with "confidence": "high". Never claim the request is "unclear" or invent an
+"open_questions" entry solely because the transcript has no tool activity - a lack of tool
+activity on its own is not evidence the objective was ambiguous.
 
 Set confidence honestly based on how complete and consistent the gathered evidence is - "low" if
 any delegated agent reported low confidence or real limitations, "high" only when the evidence is

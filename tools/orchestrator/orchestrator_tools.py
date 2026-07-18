@@ -17,7 +17,10 @@ from vectordb.reranker import CrossEncoderReranker
 
 
 class OrchestratorTools:
-    def __init__(self, catalog, state, vector_store=None, reranker=None, memory=None, storage=None):
+    def __init__(
+        self, catalog, state, vector_store=None, reranker=None, memory=None, storage=None,
+        reports_dir: str = "data/reports",
+    ):
         self.catalog = catalog
         self.state = state
         self.storage = storage
@@ -26,7 +29,7 @@ class OrchestratorTools:
         self._reranker = reranker
         self.memory = memory or LongTermMemory()
         self.hypothesis_tools = HypothesisTools()
-        self.reporting = ReportingTools(storage) if storage else None
+        self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
 
     def list_files(self, workspace_id: str, filters: Optional[dict] = None, max_results: int = 20) -> list:
         """List files in the workspace matching a structured filter: name_contains, file_type

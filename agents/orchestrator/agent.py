@@ -12,14 +12,30 @@ from tools.orchestrator.models import InvestigationState, OrchestratorResult
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
 
 
+class InvestigationCancelled(Exception):
+    """Raised by OrchestratorAgent.run() when cancel_check() returns True
+    between steps. Callers (worker_service) catch this specifically to mark
+    the Investigation as cancelled rather than completed/failed - the
+    partial InvestigationState up to that point is still attached via
+    `.state` for logging/debugging."""
+
+    def __init__(self, state: InvestigationState):
+        super().__init__("investigation cancelled")
+        self.state = state
+
+
 class OrchestratorAgent:
-    def __init__(self, catalog, vector_store=None, reranker=None, memory=None, storage=None):
+    def __init__(
+        self, catalog, vector_store=None, reranker=None, memory=None, storage=None,
+        reports_dir: str = "data/reports",
+    ):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
         client = LLMProvider(model_config["provider"], fallback_provider="groq").get_client(model_config["model"])
 
         self.tools = OrchestratorTools(
-            catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage
+            catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
+            reports_dir=reports_dir,
         )
 
         self.agent = AssistantAgent(
@@ -52,7 +68,21 @@ class OrchestratorAgent:
             system_message=FORMAT_SYSTEM_MESSAGE,
         )
 
-    async def run(self, objective: str, workspace_id: str = "default", constraints: dict = None) -> OrchestratorResult:
+    async def run(
+        self,
+        objective: str,
+        workspace_id: str = "default",
+        constraints: dict = None,
+        on_event=None,
+        cancel_check=None,
+    ) -> OrchestratorResult:
+        """`on_event`, if given, is an `async def on_event(event: dict) -> None`
+        called once per meaningful step (tool call requested/executed) plus
+        once more right before formatting the final answer - see
+        `_translate_event` for the event shapes. `cancel_check`, if given, is
+        an `async def cancel_check() -> bool` polled between steps (never
+        mid-tool-call/mid-LLM-call); returning True stops the loop cleanly
+        and raises InvestigationCancelled instead of returning a result."""
         await self.agent.on_reset(CancellationToken())
         await self.formatter.on_reset(CancellationToken())
 
@@ -73,12 +103,36 @@ class OrchestratorAgent:
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []
-        async for event in self.agent.run_stream(task=task):
-            if not hasattr(event, "messages"):
-                log_event(self.logger, event)
-                line = self._transcript_line(event)
-                if line:
-                    transcript.append(line)
+        stream = self.agent.run_stream(task=task)
+        try:
+            async for event in stream:
+                if not hasattr(event, "messages"):
+                    log_event(self.logger, event)
+                    line = self._transcript_line(event)
+                    if line:
+                        transcript.append(line)
+                    if on_event is not None:
+                        translated = self._translate_event(event)
+                        if translated:
+                            await on_event(translated)
+
+                if cancel_check is not None and await cancel_check():
+                    await stream.aclose()
+                    if on_event is not None:
+                        await on_event({"type": "cancelled", "message": "Investigation cancelled."})
+                    raise InvestigationCancelled(self.tools.state)
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    pass
+
+        print("transcript : ",transcript)
+
+        if on_event is not None:
+            await on_event({"type": "status", "message": "Finalizing answer..."})
 
         format_task = (
             f"Objective: {objective}\n"
@@ -89,7 +143,16 @@ class OrchestratorAgent:
         format_result = await self.formatter.run(task=format_task)
         raw = format_result.messages[-1].content
         self.logger.info("final reply: %s", raw)
-        return self._parse(raw)
+        result = self._parse(raw)
+
+        if on_event is not None:
+            await on_event({
+                "type": "answer",
+                "message": result.final_answer,
+                "data": {"confidence": result.confidence, "artifact_refs": result.artifact_refs},
+            })
+
+        return result
 
     def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
         """Precompute what get_current_date/recall_user_info/list_files would return and hand
@@ -142,7 +205,56 @@ class OrchestratorAgent:
             return "\n".join(f"CALL {call.name}({call.arguments})" for call in event.content)
         if event_type == "ToolCallExecutionEvent":
             return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
+        if event_type == "TextMessage" and getattr(event, "source", None) != "user":
+            # The orchestrator's own final natural-language reply - this is the
+            # only place it appears in the stream. Without it, the formatter
+            # (which never sees the raw agent, only this transcript) has
+            # nothing to ground on when no tools were called, and fabricates
+            # an answer instead of reusing the one already given.
+            return f"AGENT SAYS: {event.content}"
         return ""
+
+    # Human-readable labels for the homescreen "live activity" panel (see
+    # project_documentation_and_claude_code_guide.md Section 6) - plain-
+    # language status, not raw tool logs.
+    _FRIENDLY_TOOL_NAMES = {
+        "list_files": "Listing workspace files",
+        "search_files": "Searching workspace files",
+        "get_file_details": "Inspecting a file",
+        "list_tables": "Listing tables extracted from documents",
+        "list_file_formats": "Checking available file types",
+        "generate_hypotheses": "Generating hypotheses",
+        "invoke_tabular_agent": "Delegating to the Tabular Agent",
+        "invoke_document_agent": "Delegating to the Document Agent",
+        "generate_csv": "Generating a CSV export",
+        "generate_markdown_report": "Writing a report",
+        "generate_dashboard": "Building a dashboard",
+        "get_current_date": "Checking today's date",
+        "recall_user_info": "Recalling saved preferences",
+        "store_user_info": "Saving a preference",
+    }
+
+    @classmethod
+    def _translate_event(cls, event) -> dict | None:
+        event_type = type(event).__name__
+        if event_type == "ToolCallRequestEvent":
+            calls = list(event.content)
+            names = [c.name for c in calls]
+            message = "; ".join(cls._FRIENDLY_TOOL_NAMES.get(n, n) for n in names)
+            return {
+                "type": "tool_call",
+                "message": message,
+                "data": {"tools": names},
+            }
+        if event_type == "ToolCallExecutionEvent":
+            names = [res.name for res in event.content]
+            message = "; ".join(f"{cls._FRIENDLY_TOOL_NAMES.get(n, n)} - done" for n in names)
+            return {
+                "type": "tool_result",
+                "message": message,
+                "data": {"tools": names},
+            }
+        return None
 
     def _parse(self, raw: str) -> OrchestratorResult:
         try:

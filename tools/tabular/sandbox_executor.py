@@ -4,11 +4,22 @@ capped memory/CPU allowance, and a hard wall-clock timeout - it can only read th
 under the app's own storage root and write new ones there via the runner's save() helper. Only
 whatever the runner explicitly returns (stdout, capped; describe()/preview()/save() outputs)
 ever leaves the container - the full DataFrames never do.
+
+docker-outside-of-docker note: `self.client` below is `docker.from_env()`, which - when
+worker_service itself runs containerized with /var/run/docker.sock bind-mounted in (see
+docker-compose.yml) - actually talks to the HOST's Docker daemon, not a daemon local to this
+container. That daemon has no concept of worker_service's own filesystem, so any bind-mount
+SOURCE path handed to it via `volumes={...}` must be a path that exists on the HOST. The only
+way that works without threading a second "host path" variable through the whole storage stack
+is to make sure `root_dir` itself IS that identical path on both sides (see the PARQUET_ROOT
+comment in worker_service/engine_bootstrap.py and the bind mount in docker-compose.yml), and to
+never bind-mount anything that lives outside of root_dir - which is why job_dir below is created
+as a subdirectory of root_dir instead of a bare tempfile.mkdtemp() scratch dir elsewhere on disk.
 """
 import json
 import os
 import shutil
-import tempfile
+import uuid
 
 import docker
 from docker.errors import ImageNotFound
@@ -70,7 +81,11 @@ class PythonSandbox:
             rel = os.path.relpath(abs_ref, self.root_dir).replace(os.sep, "/")
             container_tables[table_name] = f"/data/{rel}"
 
-        job_dir = tempfile.mkdtemp(prefix="sandbox_job_")
+        # Lives inside root_dir (not a bare tempfile.mkdtemp() elsewhere on disk) so it rides
+        # along on the exact same bind mount as the parquet data - see the DooD note up top.
+        # Under normal (non-DooD) local dev this is just a subfolder, no different in practice.
+        job_dir = os.path.join(self.root_dir, ".sandbox_jobs", uuid.uuid4().hex)
+        os.makedirs(job_dir, exist_ok=True)
         container = None
         try:
             manifest = {"tables": container_tables, "workspace_id": workspace_id, "code": code}

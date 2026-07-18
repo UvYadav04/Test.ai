@@ -4,7 +4,6 @@ duckdb
 docker
 chromadb
 docling
-sentence-transformers
 rapidfuzz
 python-dotenv
 autogen-core

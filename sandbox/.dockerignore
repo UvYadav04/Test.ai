@@ -1,0 +1,24 @@
+# Build context for this image is this sandbox/ directory itself
+# (see sandbox_executor.py: images.build(path=_SANDBOX_DIR)).
+# This image must only ever contain runner.py - keep the context minimal.
+
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+.env
+.env.*
+!.env.example
+
+.git/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+*.log
+
+Dockerfile
+.dockerignore
