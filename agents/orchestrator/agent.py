@@ -1,15 +1,18 @@
-import json
+import re
 import uuid
 from datetime import datetime, timezone
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
+from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
-from agents.orchestrator.config import FORMAT_SYSTEM_MESSAGE, SYSTEM_MESSAGE, get_model_config
+from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
 from llm_provider import LLMProvider
 from tools.orchestrator.models import InvestigationState, OrchestratorResult
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
+
+_DELIVERABLE_TOOLS = {"generate_csv", "generate_markdown_report", "generate_dashboard"}
 
 
 class InvestigationCancelled(Exception):
@@ -62,12 +65,6 @@ class OrchestratorAgent:
             max_tool_iterations=25,
         )
 
-        self.formatter = AssistantAgent(
-            name="orchestrator_formatter",
-            model_client=client,
-            system_message=FORMAT_SYSTEM_MESSAGE,
-        )
-
     async def run(
         self,
         objective: str,
@@ -77,14 +74,17 @@ class OrchestratorAgent:
         cancel_check=None,
     ) -> OrchestratorResult:
         """`on_event`, if given, is an `async def on_event(event: dict) -> None`
-        called once per meaningful step (tool call requested/executed) plus
-        once more right before formatting the final answer - see
+        called once per meaningful step (tool call requested/executed) - see
         `_translate_event` for the event shapes. `cancel_check`, if given, is
         an `async def cancel_check() -> bool` polled between steps (never
         mid-tool-call/mid-LLM-call); returning True stops the loop cleanly
-        and raises InvestigationCancelled instead of returning a result."""
+        and raises InvestigationCancelled instead of returning a result.
+
+        The orchestrator's own final reply (a plain-language TextMessage, per
+        SYSTEM_MESSAGE) is used as-is for `final_answer` - there's no second
+        LLM call reformatting it, so nothing can drift away from what the
+        agent actually concluded."""
         await self.agent.on_reset(CancellationToken())
-        await self.formatter.on_reset(CancellationToken())
 
         constraints = constraints or {}
         self.tools.workspace_id = workspace_id
@@ -93,6 +93,11 @@ class OrchestratorAgent:
             objective=objective,
             constraints=constraints,
         )
+        # Handed to invoke_tabular_agent/invoke_document_agent so the
+        # delegated sub-agent's own tool calls (run_python, search_documents,
+        # ...) stream as events too, not just the orchestrator's - see
+        # TabularAgent.run/DocumentAgent.run's own `on_event` param.
+        self.tools.on_event = on_event
 
         task = (
             f"Objective: {objective}\n"
@@ -103,6 +108,7 @@ class OrchestratorAgent:
         self.logger.info("objective sent to agent: %s", task)
 
         transcript = []
+        final_text = ""
         stream = self.agent.run_stream(task=task)
         try:
             async for event in stream:
@@ -111,6 +117,8 @@ class OrchestratorAgent:
                     line = self._transcript_line(event)
                     if line:
                         transcript.append(line)
+                    if type(event).__name__ == "TextMessage" and getattr(event, "source", None) == self.agent.name:
+                        final_text = event.content
                     if on_event is not None:
                         translated = self._translate_event(event)
                         if translated:
@@ -129,30 +137,12 @@ class OrchestratorAgent:
                 except Exception:
                     pass
 
-        print("transcript : ",transcript)
-
-        if on_event is not None:
-            await on_event({"type": "status", "message": "Finalizing answer..."})
-
-        format_task = (
-            f"Objective: {objective}\n"
-            f"Investigation State:\n{self.tools.state.summary()}\n"
-            "Tool activity:\n" + "\n".join(transcript) +
-            "\nRespond with ONLY the final JSON now."
+        self.logger.info("final reply: %s", final_text)
+        return OrchestratorResult(
+            final_answer=final_text,
+            artifact_refs=self._collect_artifact_refs(transcript),
+            open_questions=self.tools.state.open_questions,
         )
-        format_result = await self.formatter.run(task=format_task)
-        raw = format_result.messages[-1].content
-        self.logger.info("final reply: %s", raw)
-        result = self._parse(raw)
-
-        if on_event is not None:
-            await on_event({
-                "type": "answer",
-                "message": result.final_answer,
-                "data": {"confidence": result.confidence, "artifact_refs": result.artifact_refs},
-            })
-
-        return result
 
     def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
         """Precompute what get_current_date/recall_user_info/list_files would return and hand
@@ -205,28 +195,25 @@ class OrchestratorAgent:
             return "\n".join(f"CALL {call.name}({call.arguments})" for call in event.content)
         if event_type == "ToolCallExecutionEvent":
             return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
-        if event_type == "TextMessage" and getattr(event, "source", None) != "user":
-            # The orchestrator's own final natural-language reply - this is the
-            # only place it appears in the stream. Without it, the formatter
-            # (which never sees the raw agent, only this transcript) has
-            # nothing to ground on when no tools were called, and fabricates
-            # an answer instead of reusing the one already given.
-            return f"AGENT SAYS: {event.content}"
         return ""
 
     # Human-readable labels for the homescreen "live activity" panel (see
     # project_documentation_and_claude_code_guide.md Section 6) - plain-
-    # language status, not raw tool logs.
+    # language status, not raw tool logs, and never the internal name of a
+    # delegated agent (invoke_tabular_agent/invoke_document_agent both just
+    # read as "Assigning an agent" - the user sees what's happening, not
+    # which specialist is doing it). See agents/events.py for why there's no
+    # matching "done" event for any of these.
     _FRIENDLY_TOOL_NAMES = {
-        "list_files": "Listing workspace files",
-        "search_files": "Searching workspace files",
-        "get_file_details": "Inspecting a file",
-        "list_tables": "Listing tables extracted from documents",
-        "list_file_formats": "Checking available file types",
+        "list_files": "Listing files",
+        "search_files": "Searching files",
+        "get_file_details": "Getting file metadata",
+        "list_tables": "Listing tables",
+        "list_file_formats": "Checking file types",
         "generate_hypotheses": "Generating hypotheses",
-        "invoke_tabular_agent": "Delegating to the Tabular Agent",
-        "invoke_document_agent": "Delegating to the Document Agent",
-        "generate_csv": "Generating a CSV export",
+        "invoke_tabular_agent": "Assigning an agent",
+        "invoke_document_agent": "Assigning an agent",
+        "generate_csv": "Exporting a CSV",
         "generate_markdown_report": "Writing a report",
         "generate_dashboard": "Building a dashboard",
         "get_current_date": "Checking today's date",
@@ -234,42 +221,29 @@ class OrchestratorAgent:
         "store_user_info": "Saving a preference",
     }
 
-    @classmethod
-    def _translate_event(cls, event) -> dict | None:
-        event_type = type(event).__name__
-        if event_type == "ToolCallRequestEvent":
-            calls = list(event.content)
-            names = [c.name for c in calls]
-            message = "; ".join(cls._FRIENDLY_TOOL_NAMES.get(n, n) for n in names)
-            return {
-                "type": "tool_call",
-                "message": message,
-                "data": {"tools": names},
-            }
-        if event_type == "ToolCallExecutionEvent":
-            names = [res.name for res in event.content]
-            message = "; ".join(f"{cls._FRIENDLY_TOOL_NAMES.get(n, n)} - done" for n in names)
-            return {
-                "type": "tool_result",
-                "message": message,
-                "data": {"tools": names},
-            }
-        return None
+    _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))
 
-    def _parse(self, raw: str) -> OrchestratorResult:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            self.logger.warning("agent did not return valid JSON")
-            return OrchestratorResult(
-                final_answer=raw,
-                confidence="low",
-                open_questions=self.tools.state.open_questions,
-            )
+    def _collect_artifact_refs(self, transcript: list) -> list:
+        """Real artifact paths only - never something an LLM transcribed and could get wrong.
+        Two sources: (1) whatever the delegated Tabular/Document agents already reported on
+        their own TabularFindings/DocumentFindings.artifact_refs (e.g. a table_ref surfaced
+        from a PDF), read straight off InvestigationState.completed_tasks; (2) any file path a
+        generate_csv/generate_markdown_report/generate_dashboard call actually returned, parsed
+        out of its RESULT line in the tool-call transcript."""
+        refs = []
+        for event in self.tools.state.completed_tasks:
+            for ref in getattr(event.result, "artifact_refs", None) or []:
+                if ref not in refs:
+                    refs.append(ref)
 
-        return OrchestratorResult(
-            final_answer=data.get("final_answer", ""),
-            confidence=data.get("confidence", "low"),
-            artifact_refs=data.get("artifact_refs", []),
-            open_questions=data.get("open_questions", self.tools.state.open_questions),
-        )
+        pattern = re.compile(r"^RESULT (\w+) -> (.+)$")
+        for line in transcript:
+            for sub_line in line.split("\n"):
+                match = pattern.match(sub_line)
+                if not match or match.group(1) not in _DELIVERABLE_TOOLS:
+                    continue
+                ref = match.group(2).strip()
+                if ref and ref not in refs:
+                    refs.append(ref)
+
+        return refs

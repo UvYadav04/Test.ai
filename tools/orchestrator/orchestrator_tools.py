@@ -30,6 +30,12 @@ class OrchestratorTools:
         self.memory = memory or LongTermMemory()
         self.hypothesis_tools = HypothesisTools()
         self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
+        # Set per-run by OrchestratorAgent.run() (there's no `run` call on
+        # this class itself to hand it in through). Forwarded into the
+        # delegated Tabular/Document agent's own run() so its tool calls
+        # (run_python, search_documents, ...) stream as events too, not just
+        # invoke_tabular_agent/invoke_document_agent's own start event.
+        self.on_event = None
 
     def list_files(self, workspace_id: str, filters: Optional[dict] = None, max_results: int = 20) -> list:
         """List files in the workspace matching a structured filter: name_contains, file_type
@@ -116,8 +122,10 @@ class OrchestratorTools:
         must_export: bool = False,
     ):
         """Delegate a data-analysis question to the Tabular Agent, scoped only to the given
-        assigned_files (each {file_id, output_ref}). It runs its own sandboxed Python/DuckDB
-        tool-calling loop in an isolated context and returns one compact TabularFindings - you
+        assigned_files (each {file_id} - just the file_id, the orchestrator resolves the real
+        output_ref from the catalog itself, never trust or invent one). It runs its own
+        sandboxed Python/DuckDB tool-calling loop in an isolated context and returns one compact
+        TabularFindings - you
         never see its raw code, intermediate output, or the underlying data. Use for CSV/table
         data: aggregates, filters, joins, computed answers - including tables surfaced by the
         Document Agent via table_ref.
@@ -140,7 +148,7 @@ class OrchestratorTools:
                 "string in your findings' artifact_refs."
             )
 
-        result = await agent.run(effective_objective, constraints)
+        result = await agent.run(effective_objective, constraints, on_event=self.on_event)
 
         if must_export:
             valid_refs = [
@@ -167,7 +175,7 @@ class OrchestratorTools:
         facts, quotes, or finding which tables exist in a document."""
         constraints = constraints or {}
         agent = DocumentAgent(assigned_files, vector_store=self._get_vector_store(), reranker=self._get_reranker())
-        result = await agent.run(objective, constraints)
+        result = await agent.run(objective, constraints, on_event=self.on_event)
         self._record_event("document", objective, result)
         return result
 
@@ -259,8 +267,9 @@ class OrchestratorTools:
 
     def _to_tabular_file_ref(self, file_ref) -> TabularFileRef:
         entry = self.catalog.entries.get(file_ref.file_id)
-        filename = entry.filename if entry else ""
-        return TabularFileRef(file_id=file_ref.file_id, output_ref=file_ref.output_ref, filename=filename)
+        if entry is None:
+            raise ValueError(f"file_id '{file_ref.file_id}' not found in catalog")
+        return TabularFileRef(file_id=entry.file_id, output_ref=entry.output_ref, filename=entry.filename)
 
     def _get_vector_store(self):
         if self._vector_store is None:

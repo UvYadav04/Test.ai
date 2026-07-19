@@ -20,24 +20,17 @@ class FileCatalogEntry:
 @dataclass
 class FileRef:
     file_id: str
-    output_ref: str
 
 
 @dataclass
 class TabularFindings:
     summary: str
-    findings: list
-    limitations: str
-    confidence: str
     artifact_refs: list = field(default_factory=list)
 
 
 @dataclass
 class DocumentFindings:
     summary: str
-    findings: list
-    limitations: str
-    confidence: str
     artifact_refs: list = field(default_factory=list)
     source_refs: list = field(default_factory=list)
 
@@ -79,6 +72,5 @@ class InvestigationState:
 @dataclass
 class OrchestratorResult:
     final_answer: str
-    confidence: str
     artifact_refs: list = field(default_factory=list)
     open_questions: list = field(default_factory=list)
