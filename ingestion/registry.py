@@ -12,11 +12,15 @@ from ingestion.file_types.base import BaseIngestor
 from ingestion.file_types.csv.csv_ingestor import CSVIngestor
 from ingestion.file_types.json.json_ingestor import JSONIngestor
 from ingestion.file_types.pdf.pdf_ingestor import PDFIngestor
+from ingestion.file_types.txt.txt_ingestor import TXTIngestor
+from ingestion.file_types.xlsx.xlsx_ingestor import XLSXIngestor
 
 EXTENSION_REGISTRY: dict[str, Type[BaseIngestor]] = {
     ".csv": CSVIngestor,
     ".json": JSONIngestor,
     ".pdf": PDFIngestor,
+    ".txt": TXTIngestor,
+    ".xlsx": XLSXIngestor,
 }
 
 

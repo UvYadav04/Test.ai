@@ -1,58 +1,40 @@
 import os
+from typing import Optional
 
-from ingestion.file_types.base import BaseIngestor
+import pandas as pd
+
+from ingestion.file_types.base import SingleTableIngestor
 from ingestion.file_types.json.utils import (
     flatten_records,
-    infer_dtypes,
     load_json,
     stringify_lists,
     to_records,
 )
-from ingestion.models import IngestionResult
 
 
-class JSONIngestor(BaseIngestor):
+class JSONIngestor(SingleTableIngestor):
+    """extract_metadata/ingest come from SingleTableIngestor - this class supplies the
+    JSON-specific bits: record extraction/flattening, stringifying list/dict columns so
+    parquet can store them, and its own validate() (JSON validity is "has at least one
+    record", not "has at least one column" - a record can flatten to zero columns and still
+    be a real row, unlike CSV/base's default column-count check)."""
+
     def validate(self, file_path: str) -> bool:
         if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
             return False
         try:
-            data = load_json(file_path)
-            return len(to_records(data)) > 0
+            return len(to_records(load_json(file_path))) > 0
         except Exception:
             return False
 
-    def extract_metadata(self, file_path: str) -> dict:
-        data = load_json(file_path)
-        records = to_records(data)
-        df = flatten_records(records[:50])
-        return {"columns": list(df.columns), "dtypes": infer_dtypes(df)}
+    def _read_dataframe(self, file_path: str, nrows: Optional[int] = None) -> pd.DataFrame:
+        records = to_records(load_json(file_path))
+        if nrows is not None:
+            records = records[:nrows]
+        return flatten_records(records)
 
-    def ingest(self, file_path: str, workspace_id: str, file_id: str) -> IngestionResult:
-        try:
-            data = load_json(file_path)
-            records = to_records(data)
-            df = flatten_records(records)
-            df = stringify_lists(df)
+    def _postprocess(self, df: pd.DataFrame) -> pd.DataFrame:
+        return stringify_lists(df)
 
-            if self.storage is None:
-                raise RuntimeError("no storage backend provided")
-
-            output_ref = self.storage.write(df, f"{workspace_id}/{file_id}.parquet")
-
-            return IngestionResult(
-                file_id=file_id,
-                workspace_id=workspace_id,
-                status="success",
-                output_ref=output_ref,
-                schema_summary={"columns": list(df.columns), "dtypes": infer_dtypes(df)},
-                row_count=len(df),
-            )
-        except Exception as exc:
-            return IngestionResult(
-                file_id=file_id,
-                workspace_id=workspace_id,
-                status="failed",
-                output_ref="",
-                schema_summary={},
-                errors=[str(exc)],
-            )
+    def _metadata_extra(self, file_path: str) -> dict:
+        return {"top_level_type": "list" if isinstance(load_json(file_path), list) else "dict"}

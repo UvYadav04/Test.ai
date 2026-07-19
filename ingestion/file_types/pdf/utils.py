@@ -1,6 +1,8 @@
-from docling.datamodel.base_models import ConversionStatus, InputFormat
+from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
+
+from ingestion.docling_utils import conversion_errors
 
 
 def convert_document(file_path: str) -> tuple:
@@ -13,20 +15,8 @@ def convert_document(file_path: str) -> tuple:
     converter = DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
-    result = converter.convert(file_path,page_range=(1,5))
-    return result.document, _conversion_errors(result)
-
-
-def _conversion_errors(result) -> list:
-    errors = []
-    if result.status != ConversionStatus.SUCCESS:
-        errors.append(f"docling conversion status: {result.status.value}")
-
-    for item in result.errors:
-        page = f" (page {item.page_no})" if item.page_no else ""
-        errors.append(f"docling {item.module_name}{page}: {item.error_message}")
-
-    return errors
+    result = converter.convert(file_path, page_range=(1, 5))
+    return result.document, conversion_errors(result)
 
 
 def get_page_count(document) -> int:

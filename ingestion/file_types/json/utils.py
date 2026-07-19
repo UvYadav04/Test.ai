@@ -20,10 +20,6 @@ def flatten_records(records: list) -> pd.DataFrame:
     return pd.json_normalize(records)
 
 
-def infer_dtypes(df: pd.DataFrame) -> dict:
-    return {col: str(dtype) for col, dtype in df.dtypes.items()}
-
-
 def stringify_lists(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
         if df[col].dtype == object:
