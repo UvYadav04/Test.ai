@@ -74,3 +74,4 @@ class OrchestratorResult:
     final_answer: str
     artifact_refs: list = field(default_factory=list)
     open_questions: list = field(default_factory=list)
+    files_used: list = field(default_factory=list)

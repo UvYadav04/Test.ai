@@ -137,6 +137,7 @@ class OrchestratorTools:
         know to retry rather than silently passing a fake reference on to generate_csv/
         generate_dashboard."""
         constraints = constraints or {}
+        self.state.selected_files.extend(f.file_id for f in assigned_files)
         tabular_files = [self._to_tabular_file_ref(f) for f in assigned_files]
         agent = TabularAgent(tabular_files, storage=self.storage, workspace_id=self.workspace_id)
 
@@ -174,6 +175,7 @@ class OrchestratorTools:
         DocumentFindings - you never see its raw chunks. Use for PDF/text content: summaries,
         facts, quotes, or finding which tables exist in a document."""
         constraints = constraints or {}
+        self.state.selected_files.extend(f.file_id for f in assigned_files)
         agent = DocumentAgent(assigned_files, vector_store=self._get_vector_store(), reranker=self._get_reranker())
         result = await agent.run(objective, constraints, on_event=self.on_event)
         self._record_event("document", objective, result)

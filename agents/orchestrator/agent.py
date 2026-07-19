@@ -70,6 +70,7 @@ class OrchestratorAgent:
         objective: str,
         workspace_id: str = "default",
         constraints: dict = None,
+        thread_context: dict = None,
         on_event=None,
         cancel_check=None,
     ) -> OrchestratorResult:
@@ -79,6 +80,15 @@ class OrchestratorAgent:
         an `async def cancel_check() -> bool` polled between steps (never
         mid-tool-call/mid-LLM-call); returning True stops the loop cleanly
         and raises InvestigationCancelled instead of returning a result.
+
+        `thread_context`, if given, is a dict with the calling chat's
+        {summary, recent_turns, files_used, files_created} - see
+        shared/models/chat.py and _thread_context_brief. This agent instance
+        is built fresh per job and never remembers anything between calls
+        itself (on_reset() below is explicit about that), so this is the
+        ONLY way an earlier message in the same chat reaches this run -
+        worker_service.tasks.investigation reads it off the Chat doc before
+        calling this and writes the updated version back after.
 
         The orchestrator's own final reply (a plain-language TextMessage, per
         SYSTEM_MESSAGE) is used as-is for `final_answer` - there's no second
@@ -103,6 +113,7 @@ class OrchestratorAgent:
             f"Objective: {objective}\n"
             f"Workspace: {workspace_id}\n"
             f"Constraints: {constraints}\n\n"
+            f"{self._thread_context_brief(thread_context)}\n\n"
             f"{self._context_brief()}"
         )
         self.logger.info("objective sent to agent: %s", task)
@@ -142,7 +153,50 @@ class OrchestratorAgent:
             final_answer=final_text,
             artifact_refs=self._collect_artifact_refs(transcript),
             open_questions=self.tools.state.open_questions,
+            # Dedup while preserving first-seen order - dict.fromkeys is the
+            # idiomatic way to do that without reaching for a separate set +
+            # list. worker_service.tasks.investigation merges this into the
+            # Chat's files_used after the run, for the NEXT investigation in
+            # this chat to see via thread_context.
+            files_used=list(dict.fromkeys(self.tools.state.selected_files)),
         )
+
+    def _thread_context_brief(self, thread_context: dict | None) -> str:
+        """Continuity from earlier turns in THIS chat - distinct from
+        _context_brief's workspace-wide file catalog. Comes from
+        Chat.summary/recent_turns/files_used/files_created
+        (shared/models/chat.py), refreshed after every completed
+        investigation in this chat by
+        worker_service.tasks.investigation._update_chat_continuity - this
+        method only ever formats whatever it's handed, it never reads or
+        writes anything itself."""
+        if not thread_context:
+            return "This is the first message in this chat - no earlier context."
+
+        lines = []
+
+        summary = thread_context.get("summary")
+        if summary:
+            lines.append(f"Summary of this chat so far: {summary}")
+
+        recent_turns = thread_context.get("recent_turns") or []
+        if recent_turns:
+            lines.append("Most recent turns in this chat (oldest first) - use these to resolve "
+                         "references like \"that file\", \"the same but by region\", or a "
+                         "correction to what you said before:")
+            for turn in recent_turns:
+                lines.append(f"- User: {turn.get('query', '')}")
+                lines.append(f"  You answered: {turn.get('response', '')}")
+
+        files_used = thread_context.get("files_used") or []
+        if files_used:
+            lines.append(f"file_ids already queried earlier in this chat: {files_used}")
+
+        files_created = thread_context.get("files_created") or []
+        if files_created:
+            lines.append(f"Artifacts already produced earlier in this chat: {files_created}")
+
+        return "\n".join(lines) if lines else "This is the first message in this chat - no earlier context."
 
     def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
         """Precompute what get_current_date/recall_user_info/list_files would return and hand
