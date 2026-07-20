@@ -9,6 +9,7 @@ from autogen_core import CancellationToken
 from agents.events import make_tool_event_translator, truncate, truncate_lines
 from agents.logger import get_agent_logger, log_event
 from agents.tabular.config import get_model_config, get_system_message
+from agents.thread_context import thread_context_brief
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider
 from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
@@ -85,7 +86,9 @@ class TabularAgent:
         self.last_transform_script: str | None = None
         self.last_transform_file_ids: list = []
 
-    async def run(self, objective: str, constraints: dict = None, on_event=None) -> TabularFindings:
+    async def run(
+        self, objective: str, constraints: dict = None, on_event=None, thread_context: dict = None,
+    ) -> TabularFindings:
         await self.agent.on_reset(CancellationToken())
         self.last_transform_script = None
         self.last_transform_file_ids = []
@@ -94,12 +97,19 @@ class TabularAgent:
 
         constraints = constraints or {}
         allowed_files = self.tools.list_allowed_files()
+        # thread_context matters most when this agent was DIRECT-routed (see run_investigation's
+        # direct_route branch) - the Orchestrator never even gets involved, so this is the ONLY
+        # place "show me a chart of THIS data" (referring to a file/result from an earlier turn)
+        # can get resolved. When the Orchestrator invoked this agent instead, it's already folded
+        # earlier turns into its own objective text, so this is usually redundant there - never
+        # harmful either way.
         task = (
             f"Objective: {objective}\n"
             f"Assigned files - use these exact file_id/table_name values, do not guess or "
             f"invent others, and you do not need to call list_allowed_files again unless you "
             f"want to re-check them: {allowed_files}\n"
-            f"Constraints: {constraints}"
+            f"Constraints: {constraints}\n\n"
+            f"{thread_context_brief(thread_context)}"
         )
         self.logger.info("objective sent to agent: %s", task)
 

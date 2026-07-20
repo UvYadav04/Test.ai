@@ -7,6 +7,7 @@ from autogen_core import CancellationToken
 from agents.document.config import get_model_config, get_system_message
 from agents.events import make_tool_event_translator, truncate
 from agents.logger import get_agent_logger, log_event
+from agents.thread_context import thread_context_brief
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
 from tools.document.document_tools import DocumentTools
@@ -104,15 +105,19 @@ class DocumentAgent:
 
     async def run(
         self, objective: str, constraints: dict = None, on_event=None, metadata_brief: str = None,
+        thread_context: dict = None,
     ) -> DocumentFindings:
 
         await self.agent.on_reset(CancellationToken())
 
         constraints = constraints or {}
+        # thread_context matters most when this agent was DIRECT-routed (see run_investigation's
+        # direct_route branch) - see TabularAgent.run()'s matching comment for why.
         task = (
             f"Objective: {objective}\n"
             f"Assigned file_ids: {self.tools.assigned_file_ids}\n"
             f"Constraints: {constraints}\n\n"
+            f"{thread_context_brief(thread_context)}\n\n"
             f"{self._metadata_section(metadata_brief)}"
         )
         self.logger.info("objective sent to agent: %s", task)

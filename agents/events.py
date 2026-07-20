@@ -96,6 +96,13 @@ def make_tool_event_translator(
     request_detail: dict | None = None,
     result_detail: dict | None = None,
 ):
+    """Events carry ONLY `type` and `message` - no `data` payload (the frontend's per-step
+    spinner/check/cross UI, Client/src/components/chat/InvestigationTrail.tsx, derives everything
+    it needs from `type` alone: "tool_call" -> spinner, "tool_result" -> check, "tool_error" ->
+    cross - matched by pairing each tool_call with the very next tool_result/tool_error in the
+    stream). A batch with more than one call in it (rare - most turns make one tool call at a
+    time) is reported as "tool_error" as a whole if ANY call in it failed, since there's one
+    message/one status per event, not one per call."""
     request_detail = request_detail or {}
     result_detail = result_detail or {}
     # Keyed by tool NAME, not a call id - same simplification agents/timing.py's ToolCallTimer
@@ -113,33 +120,31 @@ def make_tool_event_translator(
 
         if event_type == "ToolCallRequestEvent":
             parts = []
-            names = []
             for call in event.content:
                 try:
                     args = json.loads(call.arguments)
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 pending_args[call.name] = args
-                names.append(call.name)
                 builder = request_detail.get(call.name)
                 detail = builder(args) if builder else None
                 parts.append(f"{_label(call.name)}: {detail}" if detail else _label(call.name))
-            return {"type": "tool_call", "message": "\n".join(parts), "data": {"tools": names}}
+            return {"type": "tool_call", "message": "\n".join(parts)}
 
         if event_type == "ToolCallExecutionEvent":
             parts = []
-            names = []
+            any_error = False
             for res in event.content:
-                names.append(res.name)
                 args = pending_args.pop(res.name, {})
                 if getattr(res, "is_error", False):
+                    any_error = True
                     parts.append(f"{_label(res.name)} failed: {truncate(res.content) or 'unknown error'}")
                     continue
                 result = _parse_result(res.content)
                 builder = result_detail.get(res.name, _generic_result_detail)
                 detail = builder(args, result)
                 parts.append(f"{_label(res.name)} → {detail}" if detail else f"{_label(res.name)} done")
-            return {"type": "tool_result", "message": "\n".join(parts), "data": {"tools": names}}
+            return {"type": "tool_error" if any_error else "tool_result", "message": "\n".join(parts)}
 
         return None
 
@@ -151,8 +156,7 @@ def make_tool_call_translator(friendly_names: dict[str, str]):
     def translate(event) -> dict | None:
         if type(event).__name__ != "ToolCallRequestEvent":
             return None
-        names = [call.name for call in event.content]
-        message = "; ".join(friendly_names.get(name, name) for name in names)
-        return {"type": "tool_call", "message": message, "data": {"tools": names}}
+        message = "; ".join(friendly_names.get(call.name, call.name) for call in event.content)
+        return {"type": "tool_call", "message": message}
 
     return translate
