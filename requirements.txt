@@ -13,3 +13,11 @@ autogen-core
 autogen-agentchat
 autogen-ext[openai]
 autogen-ext[anthropic]
+
+# LLM call tracing/cost/token monitoring - client for the self-hosted
+# Langfuse instance brought up in docker-compose.yml. See
+# shared/observability.py for the shared client singleton
+# (get_langfuse_client()); wiring per-call tracing into the AutoGen
+# ChatCompletionClient wrapper (llm_provider/) is the natural next step,
+# not yet done here.
+langfuse

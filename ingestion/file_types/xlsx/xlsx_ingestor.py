@@ -90,10 +90,6 @@ class XLSXIngestor(BaseIngestor):
             return IngestionResult(
                 file_id=file_id,
                 workspace_id=workspace_id,
-                # No single artifact represents "the whole workbook" - every table has its own
-                # parquet in extracted_tables, so the main entry's output_ref is intentionally
-                # empty rather than a fabricated path (mirrors PDFIngestor's output_ref, which
-                # points at a real vector collection -   xlsx has no equivalent shared location).
                 status=status,
                 output_ref="",
                 schema_summary={
