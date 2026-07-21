@@ -1,3 +1,5 @@
+import json
+import os
 import re
 
 from autogen_agentchat.agents import AssistantAgent
@@ -29,6 +31,19 @@ class TabularAgent:
             reflect_on_tool_use=False,
             max_tool_iterations=10,
         )
+        # Populated by run() below from the LAST run_python call this agent made (if any) -
+        # NOT part of the TabularFindings returned to the orchestrator LLM, deliberately.
+        # These exist so a caller that already holds a reference to this TabularAgent
+        # instance (OrchestratorTools.invoke_tabular_agent, for a real-time dashboard) can
+        # read the actual code/file_ids off the object after run() completes, the same
+        # "pull it from the real tool call, never trust the LLM to retype it" spirit as
+        # _extract_refs() below - just reaching one step further back, to the call
+        # arguments instead of the call result. Keeping it off TabularFindings means every
+        # OTHER invoke_tabular_agent call (the vast majority, which aren't building a
+        # real-time dashboard) never pays for a potentially-large code blob riding along
+        # in the orchestrator's context.
+        self.last_transform_script: str | None = None
+        self.last_transform_file_ids: list = []
 
     async def run(self, objective: str, constraints: dict = None, on_event=None) -> TabularFindings:
         """`on_event`, if given, is an `async def on_event(event: dict) -> None` -
@@ -37,6 +52,8 @@ class TabularAgent:
         on the live activity panel, not just "Assigning an agent" with
         nothing in between until it returns."""
         await self.agent.on_reset(CancellationToken())
+        self.last_transform_script = None
+        self.last_transform_file_ids = []
 
         constraints = constraints or {}
         allowed_files = self.tools.list_allowed_files()
@@ -54,6 +71,7 @@ class TabularAgent:
         async for event in self.agent.run_stream(task=task):
             if not hasattr(event, "messages"):
                 log_event(self.logger, event)
+                self._capture_run_python_call(event)
                 line = self._transcript_line(event)
                 if line:
                     transcript.append(line)
@@ -67,8 +85,45 @@ class TabularAgent:
         self.logger.info("final reply: %s", final_text)
         return TabularFindings(
             summary=final_text,
-            artifact_refs=self._extract_refs(transcript, "output_ref"),
+            artifact_refs=self._real_refs(self._extract_refs(transcript, "output_ref")),
         )
+
+    @staticmethod
+    def _real_refs(candidates: list) -> list:
+        """_extract_refs regex-scans the FULL tool-result text for anything shaped like
+        `"output_ref": "..."` - which also matches a spurious source: if the model's own
+        run_python code echoes save()'s return value (e.g. `print(save(df, name=...))` or
+        `print({"output_ref": path})`), that value is the sandbox CONTAINER-side path
+        (sandbox/runner.py's OUTPUT_ROOT="/data" inside the container), captured in the tool
+        result's stdout verbatim - never rewritten to the real host path the way the "saved"
+        list's own output_ref entries are (see sandbox_executor.py's rewrite loop). The result
+        was two candidates for the same save() call, one real
+        ("/data/parquet/<workspace>/<file>.parquet" on the host) and one not
+        ("/data/<workspace>/<file>.parquet", meaningless outside the sandbox container) - and
+        no guarantee the orchestrator picks the right one when it later hands this ref to
+        generate_csv/generate_dashboard (see the "No such file or directory" failures this
+        fixes). This process runs host-side (never inside the sandbox), so a plain existence
+        check is a reliable, cheap filter: keep only refs that are real files on this disk."""
+        return [ref for ref in candidates if os.path.isfile(ref)]
+
+    def _capture_run_python_call(self, event) -> None:
+        """Keep the LAST run_python call's real arguments (not a re-transcription) on this
+        instance - see the note in __init__. If the agent calls run_python more than once
+        while exploring, the last call wins on the assumption that's the one whose save()
+        outputs it actually used for its final answer."""
+        if type(event).__name__ != "ToolCallRequestEvent":
+            return
+        for call in event.content:
+            if call.name != "run_python":
+                continue
+            try:
+                args = json.loads(call.arguments)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            code = args.get("code")
+            if code:
+                self.last_transform_script = code
+                self.last_transform_file_ids = args.get("file_ids") or []
 
     @staticmethod
     def _transcript_line(event) -> str:

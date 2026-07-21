@@ -111,24 +111,97 @@ class ReportingTools:
             spec = self._to_chart_spec(raw_spec)
             dataframe = self.storage.read(spec.output_ref)
             self._copy_source(spec.output_ref, folder)
-
-            if spec.chart_type in ("bar", "line"):
-                rendered_sections.append(self._categorical_section(dataframe, spec))
-            elif spec.chart_type == "timeline":
-                rendered_sections.append(self._timeline_section(dataframe, spec))
-            elif spec.chart_type in ("scatter3d", "surface"):
-                rendered_sections.append(self._chart3d_section(dataframe, spec))
-            else:
-                raise ValueError(
-                    f"unknown chart_type '{spec.chart_type}' - use one of: "
-                    "bar, line, timeline, scatter3d, surface"
-                )
+            rendered_sections.append(self._render_section(dataframe, spec))
 
         html = self._render_html(title, rendered_sections, source_count=len(sections))
         path = os.path.join(folder, "dashboard.html")
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         return path
+
+    def generate_realtime_dashboard_bundle(
+        self,
+        title: str,
+        sections: list,
+        transform_script: str,
+        file_ids: list,
+        name: Optional[str] = None,
+    ) -> str:
+        """Build a real-time dashboard bundle: one small standalone HTML file per chart -
+        deliberately NOT one combined page like generate_dashboard() above, since each chart
+        needs to be independently refreshable/addressable as its own Chart doc (see
+        shared/models/dashboard.py's ChartConfig) - plus a manifest.json describing
+        everything needed to refresh the whole thing later with no LLM involvement:
+        transform_script (re-run wholesale against file_ids' CURRENT output_refs on every
+        refresh - see sandbox/runner.py, its `saved` list survives a mid-script exception)
+        and one config per chart (its ChartSpec fields plus the stable `name` its data gets
+        save()'d under inside transform_script).
+
+        Returns the manifest.json path, not an HTML path - worker_service/tasks/
+        investigation.py's _persist_artifacts() recognizes that specific filename and turns
+        it into one Dashboard doc + one Chart doc per chart, uploading each chart_N.html to
+        R2 and setting that Chart's storage_key from it."""
+        folder = self._new_folder(name or title, "dashboard")
+        charts_meta = []
+
+        for index, raw_spec in enumerate(sections):
+            spec = self._to_chart_spec(raw_spec)
+            dataframe = self.storage.read(spec.output_ref)
+            self._copy_source(spec.output_ref, folder)
+            section = self._render_section(dataframe, spec)
+
+            html_filename = f"chart_{index}.html"
+            html = self._render_html(section["title"], [section], source_count=1)
+            with open(os.path.join(folder, html_filename), "w", encoding="utf-8") as f:
+                f.write(html)
+
+            charts_meta.append({
+                "name": spec.name or self._slugify(spec.title) or f"chart_{index}",
+                "html_filename": html_filename,
+                "chart_type": spec.chart_type,
+                "title": section["title"],
+                "label_column": spec.label_column,
+                "value_columns": spec.value_columns,
+                "time_column": spec.time_column,
+                "series_column": spec.series_column,
+                "value_column": spec.value_column,
+                "x_column": spec.x_column,
+                "y_column": spec.y_column,
+                "z_column": spec.z_column,
+            })
+
+        manifest = {
+            "title": title,
+            "file_ids": file_ids,
+            "transform_script": transform_script,
+            "charts": charts_meta,
+        }
+        manifest_path = os.path.join(folder, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        return manifest_path
+
+    @classmethod
+    def _render_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
+        """Shared by generate_dashboard (combined page) and
+        generate_realtime_dashboard_bundle (one page per chart) - dispatches to the right
+        _*_section builder for spec.chart_type."""
+        if spec.chart_type in ("bar", "line"):
+            return cls._categorical_section(dataframe, spec)
+        if spec.chart_type == "timeline":
+            return cls._timeline_section(dataframe, spec)
+        if spec.chart_type in ("scatter3d", "surface"):
+            return cls._chart3d_section(dataframe, spec)
+        raise ValueError(
+            f"unknown chart_type '{spec.chart_type}' - use one of: "
+            "bar, line, timeline, scatter3d, surface"
+        )
+
+    @staticmethod
+    def _slugify(text: Optional[str]) -> str:
+        if not text:
+            return ""
+        return re.sub(r"[^0-9a-zA-Z]+", "_", text).strip("_").lower()
 
     @staticmethod
     def _to_chart_spec(raw) -> ChartSpec:
@@ -383,6 +456,29 @@ Chart.defaults.plugins.tooltip.cornerRadius = 8;
 Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
 {"".join(chart_scripts)}
 {"".join(plot_scripts)}
+</script>
+<script>
+// Reports/dashboards render inside a sandboxed iframe on the client with no
+// fixed height (see AutoHeightIframe.tsx) - it sizes itself to whatever
+// height we report here instead of clipping content or growing indefinitely.
+// Posted on load, on any layout shift (fonts/images settling, Chart.js's
+// animation, Plotly's own resize), and a couple of delayed catch-up calls
+// for chart libraries that finish rendering a tick after 'load' fires.
+(function() {{
+  function postHeight() {{
+    window.parent.postMessage(
+      {{ source: "data-analyzer-chart", height: document.documentElement.scrollHeight }}, "*"
+    );
+  }}
+  window.addEventListener("load", postHeight);
+  if (window.ResizeObserver) {{
+    new ResizeObserver(postHeight).observe(document.body);
+  }} else {{
+    window.addEventListener("resize", postHeight);
+  }}
+  setTimeout(postHeight, 300);
+  setTimeout(postHeight, 1000);
+}})();
 </script>
 </body>
 </html>

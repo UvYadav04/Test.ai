@@ -17,7 +17,7 @@ import pandas as pd
 MANIFEST_PATH = "/job/manifest.json"
 RESULT_PATH = "/job/result.json"
 OUTPUT_ROOT = "/data"
-PREVIEW_CAP = 20
+PREVIEW_CAP = 5
 MAX_STDOUT_CHARS = 500
 
 
@@ -43,9 +43,9 @@ def main():
             "null_counts": {str(c): int(n) for c, n in df.isnull().sum().items()},
         }
 
-    def preview(df, n=10):
+    def preview(df, n=5):
         """Up to n rows (hard-capped at 50) as a list of dicts - use instead of print(df)."""
-        n = max(1, min(int(n), 50))
+        n = max(1, min(int(n), 10))
         return json.loads(df.head(n).to_json(orient="records"))
 
     def sql(query):

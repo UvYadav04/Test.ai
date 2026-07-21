@@ -214,7 +214,14 @@ class OrchestratorAgent:
         else:
             lines.append("No standing user preferences/facts saved yet.")
 
-        entries = self.tools.catalog.all()
+        # .browsable(), not .all(): same visibility rules as list_files/search_files (see
+        # FileCatalog.is_browsable) - an xlsx workbook's own file_id never appears here (it has
+        # no queryable data of its own, only its sheets do - see list_tables), and a PDF's
+        # per-page tables are never pre-enumerated here (a dense PDF can have dozens; this brief
+        # is rebuilt fresh into every single task message, so listing them all would blow up
+        # context turn after turn - they're meant to surface lazily via a Document Agent's own
+        # table_ref instead).
+        entries = self.tools.catalog.browsable()
         if not entries:
             lines.append("Workspace files: none uploaded yet.")
         else:

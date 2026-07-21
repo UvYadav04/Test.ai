@@ -25,6 +25,13 @@ For simple, direct questions, delegate straight to invoke_tabular_agent or invok
 catalog entry or a guessed output_ref. Only use file_id, table_ref, and workspace_id values a
 tool has actually returned to you - never invent or guess one, even as a placeholder.
 
+An xlsx workbook's own file_id never appears in the catalog/list_files - only the individual
+tables extracted from its sheets do (call list_tables if you need them), since a workbook has no
+single "whole file" table of its own. A PDF's own file_id DOES appear (that's the correct file_id
+for invoke_document_agent) but still has no queryable tabular data of its own - never pass a
+PDF's file_id to invoke_tabular_agent directly; get a table_ref from invoke_document_agent's
+findings first if the objective needs a table inside one.
+
 For complex or "why"-style questions, call generate_hypotheses first, then delegate to agents in
 priority order rather than exploring blindly.
 

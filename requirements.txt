@@ -5,6 +5,8 @@ duckdb
 docker
 chromadb
 docling
+pypdf
+llama-cloud-services
 rapidfuzz
 python-dotenv
 autogen-core

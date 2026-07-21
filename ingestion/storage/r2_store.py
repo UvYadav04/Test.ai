@@ -28,7 +28,7 @@ import io
 
 import pandas as pd
 
-from ingestion.storage.base import BaseObjectStore
+from ingestion.storage.base import BaseObjectStore, dedupe_columns
 
 
 class R2ParquetStore(BaseObjectStore):
@@ -41,6 +41,7 @@ class R2ParquetStore(BaseObjectStore):
         return f"{self.prefix}/{path}"
 
     def write(self, data: pd.DataFrame, path: str) -> str:
+        data = dedupe_columns(data)
         key = self._key(path)
         buffer = io.BytesIO()
         data.to_parquet(buffer, index=False)

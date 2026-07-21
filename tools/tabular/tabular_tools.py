@@ -22,8 +22,11 @@ class TabularTools:
         self.storage = storage
         self.workspace_id = workspace_id
         self.table_names = {}
+        print("Table names: ", self.assigned_files)
         for file_ref in assigned_files:
             self.table_names[file_ref.file_id] = register_view(self.con, file_ref.file_id, file_ref.output_ref)
+        
+        print(self.table_names)
 
         root_dir = getattr(storage, "root_dir", None)
         self._sandbox = PythonSandbox(root_dir) if root_dir else None
@@ -92,6 +95,7 @@ class TabularTools:
             raise RuntimeError("no storage configured for this agent, cannot run the sandbox")
         for file_id in file_ids:
             self._check_assigned(file_id)
+        print(self.assigned_files)
         tables = {self._table(fid): self.assigned_files[fid].output_ref for fid in file_ids}
         try:
             return self._sandbox.run(code, tables, self.workspace_id)
