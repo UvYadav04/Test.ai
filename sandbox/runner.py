@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import time
 import traceback
 import uuid
 
@@ -21,16 +22,36 @@ PREVIEW_CAP = 5
 MAX_STDOUT_CHARS = 500
 
 
+def _ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 1)
+
+
 def main():
+    # t0 is captured AFTER the `import duckdb`/`import pandas` at the top of this file have
+    # already run - those two imports are commonly 0.5-1.5s cold (numpy/duckdb's native libs
+    # loading), on top of the Python interpreter's own boot time. Neither is visible inside
+    # this timings dict for that reason: subtract total_runner_ms (below) from however long the
+    # HOST saw the container run for (sandbox_executor.py logs this separately) to get that
+    # import+interpreter-startup cost by elimination.
+    t0 = time.perf_counter()
+    timings = {}
+
     with open(MANIFEST_PATH, encoding="utf-8") as f:
         manifest = json.load(f)
+    timings["manifest_load_ms"] = _ms(t0)
 
+    t_tables = time.perf_counter()
     dfs = {}
     con = duckdb.connect(database=":memory:")
+    per_table_ms = {}
     for table_name, path in manifest["tables"].items():
+        t_one = time.perf_counter()
         df = pd.read_parquet(path)
         dfs[table_name] = df
         con.register(table_name, df)
+        per_table_ms[table_name] = _ms(t_one)
+    timings["table_load_ms"] = per_table_ms
+    timings["table_load_total_ms"] = _ms(t_tables)
 
     saved = []
 
@@ -80,6 +101,7 @@ def main():
         "duckdb": duckdb,
     }
 
+    t_exec = time.perf_counter()
     buf = io.StringIO()
     error = None
     try:
@@ -87,12 +109,19 @@ def main():
             exec(manifest["code"], namespace)  # noqa: S102 - sandboxed: no network, capped resources
     except Exception:
         error = traceback.format_exc()[-2000:]
+    # Includes every save() call the model-generated code made (to_parquet writes) - those
+    # aren't timed separately, they're wherever the code called them inside exec() above.
+    timings["exec_ms"] = _ms(t_exec)
 
     stdout_text = buf.getvalue()
     if len(stdout_text) > MAX_STDOUT_CHARS:
         stdout_text = stdout_text[:MAX_STDOUT_CHARS] + "\n...[stdout truncated]"
 
-    result = {"stdout": stdout_text, "saved": saved, "error": error}
+    # Captured just before the final write, not after - so it reflects "time spent doing work",
+    # not the write itself. sandbox_executor.py logs this alongside its own host-side timings.
+    timings["total_runner_ms"] = _ms(t0)
+
+    result = {"stdout": stdout_text, "saved": saved, "error": error, "timings": timings}
     with open(RESULT_PATH, "w", encoding="utf-8") as f:
         json.dump(result, f, default=str)
 

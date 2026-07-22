@@ -17,12 +17,16 @@ never bind-mount anything that lives outside of root_dir - which is why job_dir 
 as a subdirectory of root_dir instead of a bare tempfile.mkdtemp() scratch dir elsewhere on disk.
 """
 import json
+import logging
 import os
 import shutil
+import time
 import uuid
 
 import docker
 from docker.errors import ImageNotFound
+
+logger = logging.getLogger("tools.tabular.sandbox")
 
 IMAGE_NAME = "dataanalyzer-sandbox:latest"
 _SANDBOX_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "sandbox")
@@ -60,15 +64,21 @@ class PythonSandbox:
         return self._client
 
     def ensure_image(self) -> None:
+        start = time.perf_counter()
         try:
             self.client.images.get(self.image)
+            logger.info("sandbox image cached, check took %.3fs", time.perf_counter() - start)
         except ImageNotFound:
+            logger.info("sandbox image not found - building from %s (this only happens once)", _SANDBOX_DIR)
             self.client.images.build(path=_SANDBOX_DIR, tag=self.image, rm=True)
+            logger.info("sandbox image built in %.3fs", time.perf_counter() - start)
 
     def run(self, code: str, tables: dict, workspace_id: str) -> dict:
         """tables: {table_name: host_output_ref}. Every output_ref must live under root_dir -
         that's the only thing bind-mounted into the container."""
+        run_start = time.perf_counter()
         self.ensure_image()
+        image_check_s = time.perf_counter() - run_start
 
         container_tables = {}
         for table_name, output_ref in tables.items():
@@ -86,12 +96,15 @@ class PythonSandbox:
         # Under normal (non-DooD) local dev this is just a subfolder, no different in practice.
         job_dir = os.path.join(self.root_dir, ".sandbox_jobs", uuid.uuid4().hex)
         os.makedirs(job_dir, exist_ok=True)
+        print("root dir",self.root_dir)
+        print("job dir",job_dir)
         container = None
         try:
             manifest = {"tables": container_tables, "workspace_id": workspace_id, "code": code}
             with open(os.path.join(job_dir, "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump(manifest, f)
 
+            create_start = time.perf_counter()
             container = self.client.containers.run(
                 self.image,
                 detach=True,
@@ -103,8 +116,11 @@ class PythonSandbox:
                     job_dir: {"bind": "/job", "mode": "rw"},
                 },
             )
+            create_s = time.perf_counter() - create_start
+            logger.info("sandbox container created+started in %.3fs", create_s)
 
             timed_out = False
+            wait_start = time.perf_counter()
             try:
                 container.wait(timeout=self.timeout_seconds)
             except Exception:
@@ -113,6 +129,12 @@ class PythonSandbox:
                     container.kill()
                 except Exception:
                     pass
+            wait_s = time.perf_counter() - wait_start
+            logger.info(
+                "sandbox container ran %.3fs%s (this includes Python interpreter boot + "
+                "pandas/duckdb imports inside the container, not just your code)",
+                wait_s, " - TIMED OUT" if timed_out else "",
+            )
 
             try:
                 logs = container.logs().decode("utf-8", errors="replace")
@@ -121,6 +143,11 @@ class PythonSandbox:
 
             result_path = os.path.join(job_dir, "result.json")
             if not os.path.exists(result_path):
+                logger.warning(
+                    "sandbox run total %.3fs (image_check=%.3fs, create=%.3fs, wait=%.3fs) - no result.json (%s)",
+                    time.perf_counter() - run_start, image_check_s, create_s, wait_s,
+                    "timed out" if timed_out else "exited early",
+                )
                 return {
                     "stdout": logs[-2000:],
                     "saved": [],
@@ -133,6 +160,14 @@ class PythonSandbox:
             with open(result_path, encoding="utf-8") as f:
                 raw_result = json.load(f)
 
+            # Written by runner.py, from INSIDE the container's own clock - compare
+            # in_container_timings["total_runner_ms"] against wait_s above: the gap between them
+            # is Python interpreter startup + `import duckdb, pandas` inside the container,
+            # which isn't visible from either side individually.
+            in_container_timings = raw_result.get("timings")
+            if in_container_timings:
+                logger.info("sandbox in-container breakdown: %s", in_container_timings)
+
             for entry in raw_result.get("saved", []):
                 container_path = entry["output_ref"]
                 rel = container_path[len("/data/"):] if container_path.startswith("/data/") else container_path
@@ -140,9 +175,15 @@ class PythonSandbox:
 
             return raw_result
         finally:
+            teardown_start = time.perf_counter()
             if container is not None:
                 try:
                     container.remove(force=True)
                 except Exception:
                     pass
-            shutil.rmtree(job_dir, ignore_errors=True)
+            # shutil.rmtree(job_dir, ignore_errors=True)
+            # teardown_s = time.perf_counter() - teardown_start
+            # logger.info(
+            #     "sandbox run total %.3fs (image_check=%.3fs, teardown=%.3fs)",
+            #     time.perf_counter() - run_start, image_check_s, teardown_s,
+            # )

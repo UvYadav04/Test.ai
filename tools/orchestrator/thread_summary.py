@@ -14,7 +14,7 @@ itself.
 """
 
 from agents.orchestrator.config import get_model_config
-from llm_provider import LLMProvider
+from llm_provider import LLMProvider, get_settings
 from tools.llm_call import ask_llm_async
 
 SUMMARY_PROMPT = """You maintain a running summary of an ongoing data-analysis conversation, so a
@@ -39,7 +39,9 @@ text itself."""
 
 async def update_summary(previous_summary: str, query: str, response: str) -> str:
     model_config = get_model_config()
-    client = LLMProvider(model_config["provider"], fallback_provider="groq").get_client(model_config["model"])
+    # See orchestrator/agent.py's comment on FALLBACK_LLM_PROVIDER - same reasoning here.
+    fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
+    client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
     prompt = SUMMARY_PROMPT.format(
         previous_summary=previous_summary or "(none yet - this is the first turn in this chat)",
         query=query,

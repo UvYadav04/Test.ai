@@ -6,7 +6,7 @@ from ingestion.storage.base import BaseObjectStore, dedupe_columns
 
 
 class LocalParquetStore(BaseObjectStore):
-    def __init__(self, root_dir: str = "data/parquet"):
+    def __init__(self, root_dir: str = "./data/parquet"):
         self.root_dir = root_dir
 
     def write(self, data: pd.DataFrame, path: str) -> str:
@@ -20,6 +20,7 @@ class LocalParquetStore(BaseObjectStore):
         return pd.read_parquet(ref)
 
     def exists(self, ref: str) -> bool:
+        print(f"Checking if {ref} exists")
         return os.path.exists(ref)
 
     def delete(self, ref: str) -> None:

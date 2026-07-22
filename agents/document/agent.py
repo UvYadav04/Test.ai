@@ -6,7 +6,7 @@ from autogen_core import CancellationToken
 from agents.document.config import SYSTEM_MESSAGE, get_model_config
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
-from llm_provider import LLMProvider
+from llm_provider import LLMProvider, get_settings
 from tools.document.document_tools import DocumentTools
 from tools.orchestrator.models import DocumentFindings
 from vectordb.chroma_store import ChromaVectorStore
@@ -17,7 +17,9 @@ class DocumentAgent:
     def __init__(self, assigned_files: list, vector_store=None, reranker=None):
         self.logger = get_agent_logger("document_agent")
         model_config = get_model_config()
-        provider = LLMProvider(model_config["provider"], fallback_provider="groq")
+        # See orchestrator/agent.py's comment on FALLBACK_LLM_PROVIDER - same reasoning here.
+        fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
+        provider = LLMProvider(model_config["provider"], fallback_provider=fallback_provider)
         client = provider.get_client(model_config["model"])
 
         vector_store = vector_store or ChromaVectorStore()

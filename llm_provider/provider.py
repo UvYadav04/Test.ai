@@ -1,6 +1,7 @@
 from llm_provider import registry
 from llm_provider.fallback_client import FallbackChatCompletionClient
 from llm_provider.langfuse_wrapper import LangfuseTracedChatCompletionClient
+from llm_provider.retry_client import RetryingChatCompletionClient
 from config import get_settings
 
 
@@ -15,7 +16,7 @@ class LLMProvider:
 
         if not self.fallback_provider or self.fallback_provider == self.provider_name:
             client = builder(model)
-            return LangfuseTracedChatCompletionClient(client, self.provider_name, model)
+            return self._wrap(client, self.provider_name, model)
 
         fallback_builder = registry.get_builder(self.fallback_provider)
 
@@ -25,10 +26,18 @@ class LLMProvider:
             # primary client couldn't even be constructed (e.g. missing credentials) - there's
             # nothing to wrap, so just use the fallback directly instead of crashing.
             fallback_client = fallback_builder(None)
-            return LangfuseTracedChatCompletionClient(fallback_client, self.fallback_provider, None)
+            return self._wrap(fallback_client, self.fallback_provider, None)
 
         wrapped = FallbackChatCompletionClient(primary, fallback_builder(None))
         # Wrap the OUTERMOST client so a fallback-triggered call still
         # produces exactly one Langfuse generation per .create(), regardless
         # of which of the two underlying clients actually served it.
-        return LangfuseTracedChatCompletionClient(wrapped, self.provider_name, model)
+        return self._wrap(wrapped, self.provider_name, model)
+
+    @staticmethod
+    def _wrap(client, provider_name: str, model: str):
+        """Retry (transient connection/5xx errors only - NOT rate limits, see
+        retry_client.py) goes INSIDE Langfuse tracing, so a Langfuse generation reflects the
+        final outcome after any retries, not one entry per attempt."""
+        retrying = RetryingChatCompletionClient(client)
+        return LangfuseTracedChatCompletionClient(retrying, provider_name, model)

@@ -8,7 +8,7 @@ from autogen_core import CancellationToken
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
 from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
-from llm_provider import LLMProvider
+from llm_provider import LLMProvider, get_settings
 from tools.orchestrator.models import InvestigationState, OrchestratorResult
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
 
@@ -34,7 +34,14 @@ class OrchestratorAgent:
     ):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
-        client = LLMProvider(model_config["provider"], fallback_provider="groq").get_client(model_config["model"])
+        # FALLBACK_LLM_PROVIDER (defaults to "groq" for backward compat) - if it ends up equal
+        # to model_config["provider"] (e.g. ORCHESTRATOR_PROVIDER=groq with the default fallback
+        # left as-is), LLMProvider.get_client() detects that and skips the no-op fallback wrap
+        # entirely, so a primary-provider outage/rate-limit isn't silently "protected" by nothing.
+        # Set FALLBACK_LLM_PROVIDER to a provider genuinely different from ORCHESTRATOR_PROVIDER
+        # for the fallback to do anything.
+        fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
+        client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
 
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
