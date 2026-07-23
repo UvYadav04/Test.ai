@@ -76,7 +76,7 @@ class TabularTools:
         - dfs: dict of {table_name: DataFrame}, one entry per file_id in file_ids, already
           loaded. Use each file's table_name from list_allowed_files, not its file_id.
         - describe(df) -> {columns, dtypes, shape, null_counts} - schema/shape only, never rows.
-        - preview(df, n=10) -> up to n rows (hard-capped at 50) as a list of dicts - use this
+        - preview(df, n=10) -> up to n rows (hard-capped at 10) as a list of dicts - use this
           instead of print(df) to look at real values.
         - sql(query) -> DataFrame - run a DuckDB SQL query over the tables in `dfs`, registered
           under their table_name.

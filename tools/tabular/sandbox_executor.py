@@ -89,12 +89,13 @@ class PythonSandbox:
                     f"({self.root_dir}) - refusing to mount it"
                 )
             rel = os.path.relpath(abs_ref, self.root_dir).replace(os.sep, "/")
-            container_tables[table_name] = f"/data/{rel}"
+            container_tables[table_name] = f"/data/parquet/{rel}"
 
         # Lives inside root_dir (not a bare tempfile.mkdtemp() elsewhere on disk) so it rides
         # along on the exact same bind mount as the parquet data - see the DooD note up top.
         # Under normal (non-DooD) local dev this is just a subfolder, no different in practice.
-        job_dir = os.path.join(self.root_dir, ".sandbox_jobs", uuid.uuid4().hex)
+        job_id =  uuid.uuid4().hex
+        job_dir = os.path.join(self.root_dir, ".sandbox_jobs",job_id)
         os.makedirs(job_dir, exist_ok=True)
         print("root dir",self.root_dir)
         print("job dir",job_dir)
@@ -112,8 +113,10 @@ class PythonSandbox:
                 mem_limit=self.mem_limit,
                 nano_cpus=self.nano_cpus,
                 volumes={
-                    self.root_dir: {"bind": "/data", "mode": "rw"},
-                    job_dir: {"bind": "/job", "mode": "rw"},
+                    "dataanalyzer_parquet_data": {"bind": "/data/parquet", "mode": "rw"},
+                },
+                environment={
+                    "JOB_ID": job_id,
                 },
             )
             create_s = time.perf_counter() - create_start

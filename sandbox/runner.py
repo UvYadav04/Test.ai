@@ -14,11 +14,9 @@ import uuid
 
 import duckdb
 import pandas as pd
+import os
 
-MANIFEST_PATH = "/job/manifest.json"
-RESULT_PATH = "/job/result.json"
-OUTPUT_ROOT = "/data"
-PREVIEW_CAP = 5
+PREVIEW_CAP = 10
 MAX_STDOUT_CHARS = 500
 
 
@@ -33,8 +31,16 @@ def main():
     # this timings dict for that reason: subtract total_runner_ms (below) from however long the
     # HOST saw the container run for (sandbox_executor.py logs this separately) to get that
     # import+interpreter-startup cost by elimination.
+
+    print("inside main execution")
     t0 = time.perf_counter()
     timings = {}
+
+    job_id = os.environ["JOB_ID"]
+
+    MANIFEST_PATH = f"/data/parquet/.sandbox_jobs/{job_id}/manifest.json"
+    RESULT_PATH = f"/data/parquet/.sandbox_jobs/{job_id}/result.json"
+    OUTPUT_ROOT = "/data/parquet"
 
     with open(MANIFEST_PATH, encoding="utf-8") as f:
         manifest = json.load(f)
