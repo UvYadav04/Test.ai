@@ -1,4 +1,5 @@
 import re
+import time
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
@@ -6,6 +7,7 @@ from autogen_core import CancellationToken
 from agents.document.config import SYSTEM_MESSAGE, get_model_config
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
+from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
 from tools.document.document_tools import DocumentTools
 from tools.orchestrator.models import DocumentFindings
@@ -68,11 +70,14 @@ class DocumentAgent:
         )
         self.logger.info("objective sent to agent: %s", task)
 
+        run_start = time.perf_counter()
+        tool_timer = ToolCallTimer(self.logger)
         transcript = []
         final_text = ""
         async for event in self.agent.run_stream(task=task):
             if not hasattr(event, "messages"):
                 log_event(self.logger, event)
+                tool_timer.record(event)
                 line = self._transcript_line(event)
                 if line:
                     transcript.append(line)
@@ -84,6 +89,7 @@ class DocumentAgent:
                         await on_event(translated)
 
         self.logger.info("final reply: %s", final_text)
+        self.logger.info("document agent run took %.3fs", time.perf_counter() - run_start)
         table_refs = self._extract_refs(transcript, "table_ref")
         chunk_refs = self._extract_refs(transcript, "chunk_id")
         return DocumentFindings(

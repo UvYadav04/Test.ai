@@ -1,6 +1,10 @@
 # Build context for this image is this sandbox/ directory itself
-# (see sandbox_executor.py: images.build(path=_SANDBOX_DIR)).
-# This image must only ever contain runner.py - keep the context minimal.
+# (see sandbox_manager.py: images.build(path=_SANDBOX_DIR)).
+# This image must only ever contain sandbox_server.py, execution_engine.py, and
+# path_resolver.py (see Dockerfile's COPY line) - keep the context minimal.
+# runner.py is a deprecated stub (superseded by sandbox_server.py/execution_engine.py) that's
+# no longer COPYd into the image, but is left un-ignored here since it costs nothing to include
+# and isn't worth a special-case exclusion rule.
 
 __pycache__/
 *.pyc

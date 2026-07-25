@@ -1,3 +1,6 @@
+import logging
+import time
+
 from llm_provider import LLMProvider
 from tools.document.models import (
     ChunkResult,
@@ -8,6 +11,8 @@ from tools.document.models import (
     VerificationResult,
 )
 from tools.llm_call import ask_llm
+
+logger = logging.getLogger("tools.document")
 
 VERIFY_PROMPT = """Chunk text:
 {text}
@@ -94,10 +99,20 @@ class DocumentTools:
         filters = {"file_id": {"$in": scoped}}
         fetch_k = top_k * 3 if self.reranker else top_k
 
+        query_start = time.perf_counter()
         chunks = self.vector_store.query(query, fetch_k, filters=filters)
-        if self.reranker:
-            chunks = self.reranker.rank(query, chunks, top_k=top_k)
+        query_s = time.perf_counter() - query_start
 
+        rerank_s = 0.0
+        if self.reranker:
+            rerank_start = time.perf_counter()
+            chunks = self.reranker.rank(query, chunks, top_k=top_k)
+            rerank_s = time.perf_counter() - rerank_start
+
+        logger.info(
+            "search_documents took %.3fs (vector_query=%.3fs, rerank=%.3fs, fetch_k=%d, top_k=%d)",
+            query_s + rerank_s, query_s, rerank_s, fetch_k, top_k,
+        )
         return [self._to_result(c) for c in chunks[:top_k]]
 
     def search_within_file(self, file_id: str, query: str, top_k: int = 8) -> list:

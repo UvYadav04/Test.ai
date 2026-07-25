@@ -1,18 +1,98 @@
+import inspect
 import re
+import time
 import uuid
 from datetime import datetime, timezone
+from typing import List
 
 from autogen_agentchat.agents import AssistantAgent
-from autogen_core import CancellationToken
+from autogen_core.model_context import UnboundedChatCompletionContext
 
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
+from agents.orchestrator import capabilities
 from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
+from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
 from tools.orchestrator.models import InvestigationState, OrchestratorResult
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
 
 _DELIVERABLE_TOOLS = {"generate_csv", "generate_markdown_report", "generate_dashboard"}
+
+_AGENT_NAME = "orchestrator_agent"
+
+# Upper bound on outer (= one LLM call each, see run()'s loop) iterations - same budget the
+# single AssistantAgent used to get via max_tool_iterations=25 before this file switched to
+# reconstructing a fresh AssistantAgent per iteration (see run()'s docstring for why).
+_MAX_OUTER_ITERATIONS = 25
+
+
+class _CapabilityHolder:
+    """Tiny mutable box holding the most recent `next_capabilities` value any wrapped tool call
+    received this run - see `_wrap_with_next_capabilities` below. One instance per
+    OrchestratorAgent.run() call, reset before each outer-loop iteration so a turn that makes no
+    tool call (a plain-text final answer) can never see a stale value from an earlier turn."""
+
+    __slots__ = ("value",)
+
+    def __init__(self):
+        self.value: list[str] = []
+
+
+def _wrap_with_next_capabilities(func, holder: "_CapabilityHolder"):
+    """Generically adds one extra parameter, `next_capabilities: list[str] = []`, to ANY
+    orchestrator tool callable's exposed schema - this is applied uniformly to every tool (core
+    and capability-gated alike), never special-cased per tool name, so registering a brand new
+    capability never requires touching this function.
+
+    Why the extra param lives on every tool's own call instead of being a separate
+    `set_next_capabilities` tool: every LLM provider here is configured with
+    parallel_tool_calls=False (see llm_provider/providers/*.py, and agents/timing.py's note on
+    why), so the model can only make ONE tool call per turn - it has no way to call e.g.
+    invoke_tabular_agent AND a hypothetical separate capability-request tool in the same turn.
+    Piggybacking `next_capabilities` onto whatever tool the model was already going to call is
+    the only way to get both "the real action" and "what's needed next" out of a single model
+    round trip, which is what keeps this mechanism from adding any extra LLM calls or prompt
+    round-trips beyond what the orchestrator already made.
+
+    The real tool (`func`) is never modified and is called with its original arguments only -
+    `next_capabilities` is popped off before the call. `holder.value` is overwritten on every
+    call (default `[]` if the model didn't supply one), and is read by run()'s outer loop right
+    after the call returns to decide which capabilities to expose on the next iteration.
+    """
+    orig_sig = inspect.signature(func)
+    next_capabilities_param = inspect.Parameter(
+        "next_capabilities",
+        kind=inspect.Parameter.KEYWORD_ONLY,
+        default=[],
+        annotation=List[str],
+    )
+    new_sig = orig_sig.replace(parameters=[*orig_sig.parameters.values(), next_capabilities_param])
+
+    if inspect.iscoroutinefunction(func):
+        async def wrapper(**kwargs):
+            holder.value = list(kwargs.pop("next_capabilities", None) or [])
+            return await func(**kwargs)
+    else:
+        def wrapper(**kwargs):
+            holder.value = list(kwargs.pop("next_capabilities", None) or [])
+            return func(**kwargs)
+
+    wrapper.__name__ = func.__name__
+    wrapper.__signature__ = new_sig
+    wrapper.__annotations__ = {**getattr(func, "__annotations__", {}), "next_capabilities": List[str]}
+    base_doc = (func.__doc__ or "").rstrip()
+    wrapper.__doc__ = (
+        f"{base_doc}\n\n"
+        "next_capabilities (optional): declare which additional capability-gated tools you'll "
+        "need for your VERY NEXT call, so they're added to your toolset without bloating every "
+        "turn's prompt - pass their names as a list, e.g. [\"dashboard\"]. Registered "
+        f"capabilities:\n{capabilities.capability_catalog_text()}\n"
+        "Leave this empty (or omit it) if your next step doesn't need anything beyond your "
+        "current tools - capabilities requested here stay available for one step only, ask "
+        "again if you still need them after that."
+    )
+    return wrapper
 
 
 class InvestigationCancelled(Exception):
@@ -43,34 +123,24 @@ class OrchestratorAgent:
         fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
         client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
 
+
+
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
             reports_dir=reports_dir,
         )
+        self.model_client = client
 
-        self.agent = AssistantAgent(
-            name="orchestrator_agent",
-            model_client=client,
-            tools=[
-                self.tools.get_current_date,
-                self.tools.recall_user_info,
-                self.tools.store_user_info,
-                self.tools.list_files,
-                self.tools.search_files,
-                self.tools.get_file_details,
-                self.tools.list_tables,
-                self.tools.list_file_formats,
-                self.tools.generate_hypotheses,
-                self.tools.invoke_tabular_agent,
-                self.tools.invoke_document_agent,
-                self.tools.generate_csv,
-                self.tools.generate_markdown_report,
-                self.tools.generate_dashboard,
-            ],
-            system_message=SYSTEM_MESSAGE,
-            reflect_on_tool_use=False,
-            max_tool_iterations=25,
-        )
+        # Every tool the orchestrator could ever call, each wrapped once (not re-wrapped per
+        # run/iteration - wrapping only touches the callable's exposed schema/doc, it doesn't
+        # capture any per-run state itself) with the generic `next_capabilities` parameter. A
+        # single shared _CapabilityHolder is threaded through per run() call (see there) so
+        # whichever tool the model actually calls each turn writes into the same place.
+        self._capability_holder = _CapabilityHolder()
+        self._wrapped_tools = {
+            name: _wrap_with_next_capabilities(getattr(self.tools, name), self._capability_holder)
+            for name in capabilities.all_tool_names()
+        }
 
     async def run(
         self,
@@ -81,27 +151,7 @@ class OrchestratorAgent:
         on_event=None,
         cancel_check=None,
     ) -> OrchestratorResult:
-        """`on_event`, if given, is an `async def on_event(event: dict) -> None`
-        called once per meaningful step (tool call requested/executed) - see
-        `_translate_event` for the event shapes. `cancel_check`, if given, is
-        an `async def cancel_check() -> bool` polled between steps (never
-        mid-tool-call/mid-LLM-call); returning True stops the loop cleanly
-        and raises InvestigationCancelled instead of returning a result.
 
-        `thread_context`, if given, is a dict with the calling chat's
-        {summary, recent_turns, files_used, files_created} - see
-        shared/models/chat.py and _thread_context_brief. This agent instance
-        is built fresh per job and never remembers anything between calls
-        itself (on_reset() below is explicit about that), so this is the
-        ONLY way an earlier message in the same chat reaches this run -
-        worker_service.tasks.investigation reads it off the Chat doc before
-        calling this and writes the updated version back after.
-
-        The orchestrator's own final reply (a plain-language TextMessage, per
-        SYSTEM_MESSAGE) is used as-is for `final_answer` - there's no second
-        LLM call reformatting it, so nothing can drift away from what the
-        agent actually concluded."""
-        await self.agent.on_reset(CancellationToken())
 
         constraints = constraints or {}
         self.tools.workspace_id = workspace_id
@@ -125,37 +175,86 @@ class OrchestratorAgent:
         )
         self.logger.info("objective sent to agent: %s", task)
 
+        run_start = time.perf_counter()
+        tool_timer = ToolCallTimer(self.logger)
         transcript = []
         final_text = ""
-        stream = self.agent.run_stream(task=task)
-        try:
-            async for event in stream:
-                if not hasattr(event, "messages"):
-                    log_event(self.logger, event)
-                    line = self._transcript_line(event)
-                    if line:
-                        transcript.append(line)
-                    if type(event).__name__ == "TextMessage" and getattr(event, "source", None) == self.agent.name:
-                        final_text = event.content
-                    if on_event is not None:
-                        translated = self._translate_event(event)
-                        if translated:
-                            await on_event(translated)
 
-                if cancel_check is not None and await cancel_check():
-                    await stream.aclose()
-                    if on_event is not None:
-                        await on_event({"type": "cancelled", "message": "Investigation cancelled."})
-                    raise InvestigationCancelled(self.tools.state)
-        finally:
-            aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
-                try:
-                    await aclose()
-                except Exception:
-                    pass
+        model_context = UnboundedChatCompletionContext()
+        active_capabilities: list[str] = []
+        next_task = task
 
-        self.logger.info("final reply: %s", final_text)
+        for outer_iteration in range(_MAX_OUTER_ITERATIONS):
+            tool_names = capabilities.CORE_TOOLS + capabilities.tools_for_capabilities(active_capabilities)
+            iteration_agent = AssistantAgent(
+                name=_AGENT_NAME,
+                model_client=self.model_client,
+                tools=[self._wrapped_tools[name] for name in tool_names],
+                model_context=model_context,
+                system_message=SYSTEM_MESSAGE,
+                reflect_on_tool_use=False,
+                max_tool_iterations=1,
+            )
+            # Reset before every iteration (not just the first) so a turn that ends without any
+            # tool call - i.e. the model's final plain-text answer - can never pick up a stale
+            # value left over from an earlier turn.
+            self._capability_holder.value = []
+            ended_in_final_answer = False
+
+            self.logger.info(
+                "orchestrator outer iteration %d: exposing %d tools (%s)",
+                outer_iteration, len(tool_names), ", ".join(tool_names),
+            )
+            stream = iteration_agent.run_stream(task=next_task)
+            # Only the very first outer iteration sends the objective as a new user message -
+            # every iteration after that continues the same model_context (see docstring above).
+            next_task = None
+            try:
+                async for event in stream:
+                    if not hasattr(event, "messages"):
+                        log_event(self.logger, event)
+                        tool_timer.record(event)
+                        line = self._transcript_line(event)
+                        if line:
+                            transcript.append(line)
+                        if type(event).__name__ == "TextMessage" and getattr(event, "source", None) == _AGENT_NAME:
+                            final_text = event.content
+                            ended_in_final_answer = True
+                        if on_event is not None:
+                            translated = self._translate_event(event)
+                            if translated:
+                                await on_event(translated)
+
+                    if cancel_check is not None and await cancel_check():
+                        await stream.aclose()
+                        if on_event is not None:
+                            await on_event({"type": "cancelled", "message": "Investigation cancelled."})
+                        raise InvestigationCancelled(self.tools.state)
+            finally:
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception:
+                        pass
+
+            if ended_in_final_answer:
+                # No tool call this turn - matches autogen's own stopping rule ("if the model
+                # returns no tool call... this ends the tool call iteration loop regardless of
+                # the max_tool_iterations setting"), just enforced by this outer loop instead.
+                break
+
+            # The model's next_capabilities (from whichever tool it called this turn, captured
+            # by _wrap_with_next_capabilities) decide what's exposed on the NEXT iteration only -
+            # not accumulated - so the prompt stays as small as the model says it needs it to be.
+            active_capabilities = list(self._capability_holder.value)
+        else:
+            self.logger.warning(
+                "orchestrator hit _MAX_OUTER_ITERATIONS (%d) without a final text answer",
+                _MAX_OUTER_ITERATIONS,
+            )
+
+        self.logger.info("orchestrator agent run took %.3fs", time.perf_counter() - run_start)
         return OrchestratorResult(
             final_answer=final_text,
             artifact_refs=self._collect_artifact_refs(transcript),

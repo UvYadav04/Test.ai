@@ -20,7 +20,6 @@ class LocalParquetStore(BaseObjectStore):
         return pd.read_parquet(ref)
 
     def exists(self, ref: str) -> bool:
-        print(f"Checking if {ref} exists")
         return os.path.exists(ref)
 
     def delete(self, ref: str) -> None:

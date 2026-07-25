@@ -3,6 +3,11 @@ openpyxl
 pyarrow
 duckdb
 docker
+# Host-side HTTP-over-Unix-Domain-Socket client (sandbox/sandbox_client.py) - talks to each
+# investigation's persistent sandbox container (sandbox/sandbox_manager.py) over its .sock file
+# instead of the old one-shot-container-per-call model. Not needed inside the sandbox image
+# itself (see sandbox/Dockerfile's own fastapi/uvicorn install) - only here, host-side.
+requests-unixsocket
 chromadb
 docling
 pypdf

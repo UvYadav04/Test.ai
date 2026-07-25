@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
@@ -8,15 +9,23 @@ from autogen_core import CancellationToken
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
 from agents.tabular.config import SYSTEM_MESSAGE, get_model_config
+from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider
+from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
 from tools.orchestrator.models import TabularFindings
 from tools.tabular.tabular_tools import TabularTools
 
 
 class TabularAgent:
-    def __init__(self, assigned_files: list, storage=None, workspace_id: str = "default"):
+    def __init__(
+        self, assigned_files: list, storage=None, workspace_id: str = "default",
+        investigation_id: str = "default", sandbox_manager=None,
+    ):
         self.logger = get_agent_logger("tabular_agent")
-        self.tools = TabularTools(assigned_files, storage=storage, workspace_id=workspace_id)
+        self.tools = TabularTools(
+            assigned_files, storage=storage, workspace_id=workspace_id,
+            investigation_id=investigation_id, sandbox_manager=sandbox_manager,
+        )
         model_config = get_model_config()
         client = LLMProvider(model_config["provider"]).get_client(model_config["model"])
 
@@ -26,6 +35,7 @@ class TabularAgent:
             tools=[
                 self.tools.list_allowed_files,
                 self.tools.run_python,
+                self.tools.propose_visualization,
             ],
             system_message=SYSTEM_MESSAGE,
             reflect_on_tool_use=False,
@@ -54,6 +64,11 @@ class TabularAgent:
         await self.agent.on_reset(CancellationToken())
         self.last_transform_script = None
         self.last_transform_file_ids = []
+        # In practice this TabularTools instance is always fresh per run() (OrchestratorTools.
+        # invoke_tabular_agent constructs a new TabularAgent every call) so these are already
+        # empty - reset explicitly anyway for symmetry with the above, in case that ever changes.
+        self.tools.saved_artifacts = {}
+        self.tools.visualization_plan = []
 
         constraints = constraints or {}
         allowed_files = self.tools.list_allowed_files()
@@ -66,11 +81,14 @@ class TabularAgent:
         )
         self.logger.info("objective sent to agent: %s", task)
 
+        run_start = time.perf_counter()
+        tool_timer = ToolCallTimer(self.logger)
         transcript = []
         final_text = ""
         async for event in self.agent.run_stream(task=task):
             if not hasattr(event, "messages"):
                 log_event(self.logger, event)
+                tool_timer.record(event)
                 self._capture_run_python_call(event)
                 line = self._transcript_line(event)
                 if line:
@@ -82,29 +100,66 @@ class TabularAgent:
                     if translated:
                         await on_event(translated)
 
-        self.logger.info("final reply: %s", final_text)
+        self.logger.info("tabular agent run took %.3fs", time.perf_counter() - run_start)
+        real_refs = self._real_refs(self._extract_refs(transcript, "file_id"))
         return TabularFindings(
             summary=final_text,
-            artifact_refs=self._real_refs(self._extract_refs(transcript, "output_ref")),
+            artifact_refs=real_refs,
+            artifact_metadata=self._artifact_metadata(real_refs),
+            # self.tools.visualization_plan was populated by validated propose_visualization()
+            # calls (see TabularTools) - restricted to real_refs here so a visualization_plan
+            # entry never outlives/outreaches the artifact_refs this findings object is actually
+            # vouching for (e.g. a scratch intermediate the model saved but didn't end up
+            # reporting as a real output).
+            visualization_plan=[
+                entry for entry in self.tools.visualization_plan if entry.get("file_id") in real_refs
+            ],
         )
 
-    @staticmethod
-    def _real_refs(candidates: list) -> list:
+    def _artifact_metadata(self, real_refs: list) -> dict:
+        """{file_id: {row_count, columns, dtypes, column_kinds, preview}} for every file_id in
+        real_refs that this agent's own run_python calls actually save()'d this run - see
+        TabularTools.saved_artifacts. A real_ref that isn't in there (shouldn't normally happen,
+        since _real_refs only keeps ids confirmed to exist on disk) is simply omitted rather than
+        raising - missing metadata for one artifact shouldn't take down the whole findings
+        object."""
+        metadata = {}
+        for file_id in real_refs:
+            entry = self.tools.saved_artifacts.get(file_id)
+            if entry is None:
+                continue
+            metadata[file_id] = {
+                "row_count": entry.get("row_count"),
+                "columns": entry.get("columns"),
+                "dtypes": entry.get("dtypes"),
+                "column_kinds": entry.get("column_kinds"),
+                "preview": entry.get("preview"),
+            }
+        return metadata
+
+    def _real_refs(self, candidates: list) -> list:
         """_extract_refs regex-scans the FULL tool-result text for anything shaped like
-        `"output_ref": "..."` - which also matches a spurious source: if the model's own
+        `"file_id": "..."` - which also matches a spurious source: if the model's own
         run_python code echoes save()'s return value (e.g. `print(save(df, name=...))` or
-        `print({"output_ref": path})`), that value is the sandbox CONTAINER-side path
-        (sandbox/runner.py's OUTPUT_ROOT="/data" inside the container), captured in the tool
-        result's stdout verbatim - never rewritten to the real host path the way the "saved"
-        list's own output_ref entries are (see sandbox_executor.py's rewrite loop). The result
-        was two candidates for the same save() call, one real
-        ("/data/parquet/<workspace>/<file>.parquet" on the host) and one not
-        ("/data/<workspace>/<file>.parquet", meaningless outside the sandbox container) - and
-        no guarantee the orchestrator picks the right one when it later hands this ref to
-        generate_csv/generate_dashboard (see the "No such file or directory" failures this
-        fixes). This process runs host-side (never inside the sandbox), so a plain existence
-        check is a reliable, cheap filter: keep only refs that are real files on this disk."""
-        return [ref for ref in candidates if os.path.isfile(ref)]
+        `print({"file_id": fid})`), that same string ends up in stdout verbatim alongside the
+        structured "saved" list entries. Unlike the old output_ref-based version of this check,
+        there's no host-vs-container path ambiguity to resolve anymore - a file_id is the exact
+        same string on both sides of the sandbox boundary (see sandbox/path_resolver.py), so
+        there's only ever one candidate shape per save() call, not two. The remaining risk is a
+        fabricated id the model typed without ever calling save() - this process runs
+        host-side, so confirming the id resolves to a real file on disk is still a cheap,
+        reliable filter for that."""
+        return [ref for ref in candidates if self._artifact_exists(ref)]
+
+    def _artifact_exists(self, file_id: str) -> bool:
+        root_dir = getattr(self.tools, "root_dir", None)
+        if not root_dir:
+            return False
+        try:
+            path = get_parquet_path(root_dir, self.tools.workspace_id, file_id)
+        except InvalidArtifactIdError:
+            return False
+        return os.path.isfile(path)
 
     def _capture_run_python_call(self, event) -> None:
         """Keep the LAST run_python call's real arguments (not a re-transcription) on this
@@ -139,16 +194,17 @@ class TabularAgent:
     _FRIENDLY_TOOL_NAMES = {
         "list_allowed_files": "Listing files",
         "run_python": "Executing a Python script",
+        "propose_visualization": "Planning a visualization",
     }
 
     _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))
 
     @staticmethod
     def _extract_refs(transcript: list, key: str) -> list:
-        """Pull real output_ref paths straight out of tool results (e.g. run_python's
-        save() entries) instead of trusting an LLM to transcribe them - the sandbox already
-        returns the exact path, so re-deriving it from a second model call is both an extra
-        round trip and a chance to hallucinate or drop it."""
+        """Pull real file_ids straight out of tool results (e.g. run_python's save() entries)
+        instead of trusting an LLM to transcribe them - the sandbox already returns the exact
+        id, so re-deriving it from a second model call is both an extra round trip and a
+        chance to hallucinate or drop it."""
         text = "\n".join(transcript)
         pattern = rf"['\"]{re.escape(key)}['\"]\s*:\s*['\"]([^'\"]+)['\"]"
         refs = []

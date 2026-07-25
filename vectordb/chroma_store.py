@@ -1,8 +1,13 @@
+import logging
+import time
+
 import chromadb
 
 from config import get_settings
 from vectordb.base import BaseVectorStore
 from vectordb.schema import ChunkRecord
+
+logger = logging.getLogger("vectordb.chroma")
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -16,6 +21,7 @@ class ChromaVectorStore(BaseVectorStore):
         self.collection = self.client.get_or_create_collection(name="chunks")
 
     def upsert(self, chunks: list) -> list:
+        start = time.perf_counter()
         ids = [c.chunk_id for c in chunks]
         documents = [c.text for c in chunks]
         metadatas = [
@@ -24,30 +30,47 @@ class ChromaVectorStore(BaseVectorStore):
         ]
 
         self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+        logger.info("chroma upsert took %.3fs (%d chunks)", time.perf_counter() - start, len(ids))
         return ids
 
     def query(self, query_text: str, top_k: int, filters: dict = None) -> list:
+        start = time.perf_counter()
         result = self.collection.query(
             query_texts=[query_text],
             n_results=top_k,
             where=filters,
             include=["documents", "metadatas", "distances"],
         )
-        return self._to_chunks(result, batched=True)
+        chunks = self._to_chunks(result, batched=True)
+        logger.info(
+            "chroma query took %.3fs (top_k=%d, returned=%d)",
+            time.perf_counter() - start, top_k, len(chunks),
+        )
+        return chunks
 
     def get_by_id(self, ids: list) -> list:
+        start = time.perf_counter()
         result = self.collection.get(ids=ids)
-        return self._to_chunks(result, batched=False)
+        chunks = self._to_chunks(result, batched=False)
+        logger.info("chroma get_by_id took %.3fs (%d ids)", time.perf_counter() - start, len(ids))
+        return chunks
 
     def get_by_filter(self, filters: dict) -> list:
+        start = time.perf_counter()
         result = self.collection.get(where=filters)
-        return self._to_chunks(result, batched=False)
+        chunks = self._to_chunks(result, batched=False)
+        logger.info(
+            "chroma get_by_filter took %.3fs (returned=%d)", time.perf_counter() - start, len(chunks),
+        )
+        return chunks
 
     def delete(self, ids: list) -> None:
+        start = time.perf_counter()
         all_ids = self.collection.get().get("ids")
         if not all_ids:
             return
         self.collection.delete(ids=all_ids)
+        logger.info("chroma delete took %.3fs (%d ids)", time.perf_counter() - start, len(all_ids))
 
     def _to_chunks(self, result: dict, batched: bool) -> list:
         ids = result["ids"][0] if batched else result["ids"]

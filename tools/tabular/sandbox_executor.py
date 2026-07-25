@@ -1,35 +1,32 @@
 """Host-side driver for running model-generated pandas/DuckDB code inside an isolated Docker
-container (see sandbox/Dockerfile, sandbox/runner.py). The container has no network access, a
-capped memory/CPU allowance, and a hard wall-clock timeout - it can only read the parquet files
-under the app's own storage root and write new ones there via the runner's save() helper. Only
-whatever the runner explicitly returns (stdout, capped; describe()/preview()/save() outputs)
-ever leaves the container - the full DataFrames never do.
+sandbox. PythonSandbox's public API (construct with a root_dir, call .run(code, tables,
+workspace_id)) is UNCHANGED from when every call spun up its own one-shot container - see git
+history for that version. What changed is entirely internal: instead of creating+destroying a
+fresh container per call, this now asks the process-wide SandboxManager (sandbox_manager.py) for
+the ONE persistent, long-lived sandbox container that belongs to this investigation
+(investigation_id, passed in at construction - see TabularTools.__init__) and sends this call's
+code to it over HTTP-over-Unix-Domain-Socket (sandbox_client.py) instead of over a container's
+stdin/manifest-file/exit-code lifecycle. The sandbox itself has no network access, a capped
+memory/CPU allowance, and a hard wall-clock timeout, exactly as before - only whatever the
+sandbox explicitly returns (stdout, capped; describe()/preview()/save() outputs) ever leaves it,
+never the full DataFrames.
 
-docker-outside-of-docker note: `self.client` below is `docker.from_env()`, which - when
-worker_service itself runs containerized with /var/run/docker.sock bind-mounted in (see
-docker-compose.yml) - actually talks to the HOST's Docker daemon, not a daemon local to this
-container. That daemon has no concept of worker_service's own filesystem, so any bind-mount
-SOURCE path handed to it via `volumes={...}` must be a path that exists on the HOST. The only
-way that works without threading a second "host path" variable through the whole storage stack
-is to make sure `root_dir` itself IS that identical path on both sides (see the PARQUET_ROOT
-comment in worker_service/engine_bootstrap.py and the bind mount in docker-compose.yml), and to
-never bind-mount anything that lives outside of root_dir - which is why job_dir below is created
-as a subdirectory of root_dir instead of a bare tempfile.mkdtemp() scratch dir elsewhere on disk.
+Tables cross this boundary as file_ids, never as paths: `run(tables={table_name: file_id})`
+validates each id and workspace_id (the actual path is derived independently inside the
+container by ExecutionEngine via get_sandbox_path(workspace_id, file_id) - see
+sandbox/path_resolver.py and sandbox/execution_engine.py, which do this the same way this file's
+predecessor's runner.py counterpart always did).
+
+See sandbox/sandbox_manager.py's own docstring for the docker-outside-of-docker /
+named-Docker-volume notes that used to live in this file - they now apply to both the parquet
+volume AND the new sandbox-socket volume, and are documented once, there, instead of twice.
 """
-import json
 import logging
-import os
-import shutil
-import time
-import uuid
 
-import docker
-from docker.errors import ImageNotFound
+from sandbox.path_resolver import InvalidArtifactIdError, validate_segment
+from sandbox.sandbox_manager import SandboxManagerError, get_manager
 
 logger = logging.getLogger("tools.tabular.sandbox")
-
-IMAGE_NAME = "dataanalyzer-sandbox:latest"
-_SANDBOX_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "sandbox")
 
 
 class SandboxExecutionError(RuntimeError):
@@ -37,156 +34,72 @@ class SandboxExecutionError(RuntimeError):
 
 
 class PythonSandbox:
+    """One instance is constructed per TabularTools instance (i.e. per invoke_tabular_agent call
+    - see agents/tabular/agent.py), which is cheap: unlike before, constructing this no longer
+    implies constructing a container. The actual container is looked up/created lazily, keyed by
+    investigation_id, the first time .run() is actually called - see SandboxManager.get_or_create.
+    Every OTHER PythonSandbox instance created for the SAME investigation_id (e.g. a second
+    invoke_tabular_agent call later in the same investigation) resolves to that identical
+    container via the shared SandboxManager singleton."""
+
     def __init__(
         self,
         root_dir: str,
-        image: str = IMAGE_NAME,
+        investigation_id: str = "default",
         timeout_seconds: int = 30,
         mem_limit: str = "512m",
         nano_cpus: int = 1_000_000_000,
+        manager=None,
     ):
-        self.root_dir = os.path.abspath(root_dir)
-        self.image = image
+        self.root_dir = root_dir
+        self.investigation_id = investigation_id
         self.timeout_seconds = timeout_seconds
-        self.mem_limit = mem_limit
-        self.nano_cpus = nano_cpus
-        self._client = None
+        self._mem_limit = mem_limit
+        self._nano_cpus = nano_cpus
+        self._manager = manager
 
     @property
-    def client(self):
-        if self._client is None:
-            try:
-                self._client = docker.from_env()
-            except Exception as exc:
-                raise SandboxExecutionError(
-                    "could not connect to Docker - is Docker Desktop/daemon running?"
-                ) from exc
-        return self._client
-
-    def ensure_image(self) -> None:
-        start = time.perf_counter()
-        try:
-            self.client.images.get(self.image)
-            logger.info("sandbox image cached, check took %.3fs", time.perf_counter() - start)
-        except ImageNotFound:
-            logger.info("sandbox image not found - building from %s (this only happens once)", _SANDBOX_DIR)
-            self.client.images.build(path=_SANDBOX_DIR, tag=self.image, rm=True)
-            logger.info("sandbox image built in %.3fs", time.perf_counter() - start)
+    def manager(self):
+        """In normal operation `self._manager` is never None here - TabularTools passes the real
+        SandboxManager instance in explicitly (threaded all the way down from
+        ctx["sandbox_manager"], built once in worker.py's on_startup - see
+        OrchestratorAgent.__init__'s note on why). The get_manager() fallback below only fires
+        for a PythonSandbox built standalone (a script, a test) without that chain - do NOT rely
+        on it in worker_service's real request path: get_manager() is a module-level singleton
+        keyed by which import path reached it, and `analyzerEngine.sandbox.sandbox_manager`
+        (worker_service's own imports) vs bare `sandbox.sandbox_manager` (this module's import
+        two lines up) are two DIFFERENT entries in sys.modules, each with its own independent
+        singleton instance - see sandbox_manager.get_manager's docstring. Relying on this
+        fallback from both sides is exactly what silently created two disconnected sandboxes
+        (one pre-warmed, one used for real) before explicit injection was wired through."""
+        if self._manager is None:
+            self._manager = get_manager(mem_limit=self._mem_limit, nano_cpus=self._nano_cpus)
+        return self._manager
 
     def run(self, code: str, tables: dict, workspace_id: str) -> dict:
-        """tables: {table_name: host_output_ref}. Every output_ref must live under root_dir -
-        that's the only thing bind-mounted into the container."""
-        run_start = time.perf_counter()
-        self.ensure_image()
-        image_check_s = time.perf_counter() - run_start
-
-        container_tables = {}
-        for table_name, output_ref in tables.items():
-            abs_ref = os.path.abspath(output_ref)
-            if os.path.commonpath([abs_ref, self.root_dir]) != self.root_dir:
-                raise SandboxExecutionError(
-                    f"file for table '{table_name}' is not under the sandbox's data root "
-                    f"({self.root_dir}) - refusing to mount it"
-                )
-            rel = os.path.relpath(abs_ref, self.root_dir).replace(os.sep, "/")
-            container_tables[table_name] = f"/data/parquet/{rel}"
-
-        # Lives inside root_dir (not a bare tempfile.mkdtemp() elsewhere on disk) so it rides
-        # along on the exact same bind mount as the parquet data - see the DooD note up top.
-        # Under normal (non-DooD) local dev this is just a subfolder, no different in practice.
-        job_id =  uuid.uuid4().hex
-        job_dir = os.path.join(self.root_dir, ".sandbox_jobs",job_id)
-        os.makedirs(job_dir, exist_ok=True)
-        print("root dir",self.root_dir)
-        print("job dir",job_dir)
-        container = None
+        """tables: {table_name: file_id} - NOT a path. Each file_id is expected to already be a
+        real parquet artifact under this workspace (the caller is responsible for that - e.g.
+        TabularTools only ever passes file_ids it already validated as assigned/known).
+        validate_segment below is the same containment guard this method always applied, before
+        handing workspace_id/tables off to whichever sandbox (one-shot before, persistent now)
+        actually resolves them to a path."""
         try:
-            manifest = {"tables": container_tables, "workspace_id": workspace_id, "code": code}
-            with open(os.path.join(job_dir, "manifest.json"), "w", encoding="utf-8") as f:
-                json.dump(manifest, f)
+            workspace_id = validate_segment(workspace_id, "workspace_id")
+            container_tables = {
+                table_name: validate_segment(file_id, f"file_id for table '{table_name}'")
+                for table_name, file_id in tables.items()
+            }
+        except InvalidArtifactIdError as exc:
+            raise SandboxExecutionError(str(exc)) from exc
 
-            create_start = time.perf_counter()
-            container = self.client.containers.run(
-                self.image,
-                detach=True,
-                network_disabled=True,
-                mem_limit=self.mem_limit,
-                nano_cpus=self.nano_cpus,
-                volumes={
-                    "dataanalyzer_parquet_data": {"bind": "/data/parquet", "mode": "rw"},
-                },
-                environment={
-                    "JOB_ID": job_id,
-                },
+        logger.debug(
+            "sandbox run: investigation=%s workspace=%s tables=%d",
+            self.investigation_id, workspace_id, len(container_tables),
+        )
+        try:
+            return self.manager.execute(
+                self.investigation_id, code, container_tables, workspace_id,
+                timeout_seconds=self.timeout_seconds,
             )
-            create_s = time.perf_counter() - create_start
-            logger.info("sandbox container created+started in %.3fs", create_s)
-
-            timed_out = False
-            wait_start = time.perf_counter()
-            try:
-                container.wait(timeout=self.timeout_seconds)
-            except Exception:
-                timed_out = True
-                try:
-                    container.kill()
-                except Exception:
-                    pass
-            wait_s = time.perf_counter() - wait_start
-            logger.info(
-                "sandbox container ran %.3fs%s (this includes Python interpreter boot + "
-                "pandas/duckdb imports inside the container, not just your code)",
-                wait_s, " - TIMED OUT" if timed_out else "",
-            )
-
-            try:
-                logs = container.logs().decode("utf-8", errors="replace")
-            except Exception:
-                logs = ""
-
-            result_path = os.path.join(job_dir, "result.json")
-            if not os.path.exists(result_path):
-                logger.warning(
-                    "sandbox run total %.3fs (image_check=%.3fs, create=%.3fs, wait=%.3fs) - no result.json (%s)",
-                    time.perf_counter() - run_start, image_check_s, create_s, wait_s,
-                    "timed out" if timed_out else "exited early",
-                )
-                return {
-                    "stdout": logs[-2000:],
-                    "saved": [],
-                    "error": (
-                        f"sandbox timed out after {self.timeout_seconds}s"
-                        if timed_out else "sandbox exited without producing a result"
-                    ),
-                }
-
-            with open(result_path, encoding="utf-8") as f:
-                raw_result = json.load(f)
-
-            # Written by runner.py, from INSIDE the container's own clock - compare
-            # in_container_timings["total_runner_ms"] against wait_s above: the gap between them
-            # is Python interpreter startup + `import duckdb, pandas` inside the container,
-            # which isn't visible from either side individually.
-            in_container_timings = raw_result.get("timings")
-            if in_container_timings:
-                logger.info("sandbox in-container breakdown: %s", in_container_timings)
-
-            for entry in raw_result.get("saved", []):
-                container_path = entry["output_ref"]
-                rel = container_path[len("/data/"):] if container_path.startswith("/data/") else container_path
-                entry["output_ref"] = os.path.join(self.root_dir, rel.replace("/", os.sep))
-
-            return raw_result
-        finally:
-            teardown_start = time.perf_counter()
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
-            # shutil.rmtree(job_dir, ignore_errors=True)
-            # teardown_s = time.perf_counter() - teardown_start
-            # logger.info(
-            #     "sandbox run total %.3fs (image_check=%.3fs, teardown=%.3fs)",
-            #     time.perf_counter() - run_start, image_check_s, teardown_s,
-            # )
+        except SandboxManagerError as exc:
+            raise SandboxExecutionError(str(exc)) from exc

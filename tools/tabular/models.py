@@ -4,8 +4,12 @@ from typing import Any, Literal, Optional
 
 @dataclass
 class FileRef:
+    """Identifies an assigned file by file_id only - the real parquet location is derived on
+    demand via sandbox.path_resolver.get_parquet_path(root_dir, workspace_id, file_id), never
+    carried around as a string. workspace_id lives on the TabularTools/TabularAgent instance
+    that holds these, not per-FileRef, since every file assigned to one agent run belongs to
+    the same workspace."""
     file_id: str
-    output_ref: str
     filename: str = ""
 
 
@@ -13,7 +17,6 @@ class FileRef:
 class FileMetadata:
     file_id: str
     filename: str
-    output_ref: str
     row_count: int
     columns: list
 
@@ -34,7 +37,7 @@ class QueryResult:
     row_count: int
     truncated: bool
     error: Optional[str] = None
-    output_ref: Optional[str] = None
+    file_id: Optional[str] = None  # set only when persist=True - a file_id, never a path
 
 
 @dataclass

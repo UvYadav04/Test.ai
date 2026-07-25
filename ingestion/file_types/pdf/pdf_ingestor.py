@@ -143,7 +143,10 @@ class PDFIngestor(BaseIngestor):
             table_file_id = f"{file_id}_table_{start_index + offset}"
             dataframe = table["dataframe"]
             try:
-                output_ref = self.storage.write(dataframe, f"{workspace_id}/{table_file_id}.parquet")
+                # output_ref == table_file_id now, not storage.write()'s return value - see the
+                # note in ingestion/file_types/base.py's ingest().
+                self.storage.write(dataframe, f"{workspace_id}/{table_file_id}.parquet")
+                output_ref = table_file_id
             except Exception as exc:
                 # One malformed table (e.g. a financial table whose header collapsed to
                 # duplicate/unwriteable column names - dedupe_columns() in storage/base.py

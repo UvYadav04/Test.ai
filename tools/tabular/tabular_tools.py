@@ -1,7 +1,6 @@
-import re
-import uuid
 from typing import Optional
 
+from sandbox.path_resolver import new_artifact_id
 from tools.tabular.duckdb_utils import connect, register_view, run_query
 from tools.tabular.models import (
     ColumnProfile,
@@ -16,20 +15,47 @@ from tools.tabular.sandbox_executor import PythonSandbox, SandboxExecutionError
 
 
 class TabularTools:
-    def __init__(self, assigned_files: list, storage=None, workspace_id: str = "default"):
+    def __init__(
+        self, assigned_files: list, storage=None, workspace_id: str = "default",
+        investigation_id: str = "default", sandbox_manager=None,
+    ):
         self.assigned_files = {f.file_id: f for f in assigned_files}
         self.con = connect()
         self.storage = storage
         self.workspace_id = workspace_id
+        self.investigation_id = investigation_id
+        self.root_dir = getattr(storage, "root_dir", None)
         self.table_names = {}
-        print("Table names: ", self.assigned_files)
         for file_ref in assigned_files:
-            self.table_names[file_ref.file_id] = register_view(self.con, file_ref.file_id, file_ref.output_ref)
-        
-        print(self.table_names)
+            # register_view resolves (workspace_id, file_id) -> parquet path itself via
+            # get_parquet_path - no output_ref/path is read off file_ref anymore.
+            self.table_names[file_ref.file_id] = register_view(
+                self.con, file_ref.file_id, self.workspace_id, self.root_dir
+            )
 
-        root_dir = getattr(storage, "root_dir", None)
-        self._sandbox = PythonSandbox(root_dir) if root_dir else None
+        # investigation_id (not workspace_id) is the persistent sandbox's cache key - see
+        # sandbox_manager.py's docstring for why: this TabularTools instance is one of possibly
+        # several created over the course of a single investigation (one per invoke_tabular_agent
+        # call), and all of them should land on the SAME warm sandbox container. `sandbox_manager`
+        # (threaded all the way down from ctx["sandbox_manager"] in worker.py's on_startup) is
+        # passed through explicitly rather than left for PythonSandbox to re-resolve via
+        # get_manager() - see OrchestratorAgent.__init__'s note on why that matters.
+        self._sandbox = (
+            PythonSandbox(self.root_dir, investigation_id=self.investigation_id, manager=sandbox_manager)
+            if self.root_dir else None
+        )
+        # Every artifact this instance's run_python() calls have actually save()'d, keyed by
+        # file_id - captured straight from the sandbox's own structured response (see run_python
+        # below), never re-derived from anything the LLM wrote. TabularAgent.run() reads this
+        # off the object after its loop completes (same pattern as last_transform_script/
+        # last_transform_file_ids) to attach real columns/dtypes/row_count to what it reports
+        # back to the orchestrator, instead of the orchestrator only ever seeing a bare file_id.
+        self.saved_artifacts: dict = {}
+        # Validated visualization intent this instance's propose_visualization() calls have
+        # recorded - see that method. Read off this object by TabularAgent.run() the same way as
+        # saved_artifacts above, and attached to the returned TabularFindings as
+        # visualization_plan.
+        self.visualization_plan: list = []
 
     def _check_assigned(self, file_id: str) -> None:
         if file_id not in self.assigned_files:
@@ -59,48 +85,215 @@ class TabularTools:
                 "file_id": file_id,
                 "table_name": table,
                 "filename": file_ref.filename,
-                "output_ref": file_ref.output_ref,
                 "row_count": row_count,
                 "columns": columns,
             })
         return files
 
     def run_python(self, code: str, file_ids: list) -> dict:
-        """Execute pandas/DuckDB Python code in an isolated Docker sandbox (no network access,
-        capped memory/CPU, hard timeout) against the given assigned files. This is the primary
-        way to explore, aggregate, and persist data - DuckDB SQL is also available inside via
-        sql(query) if that's easier for a particular join/aggregation.
+        """ Execute Python code in an isolated sandbox.
 
-        Inside `code`, these are available - nothing else (no imports, no filesystem/network
-        access beyond them):
-        - dfs: dict of {table_name: DataFrame}, one entry per file_id in file_ids, already
-          loaded. Use each file's table_name from list_allowed_files, not its file_id.
-        - describe(df) -> {columns, dtypes, shape, null_counts} - schema/shape only, never rows.
-        - preview(df, n=10) -> up to n rows (hard-capped at 10) as a list of dicts - use this
-          instead of print(df) to look at real values.
-        - sql(query) -> DataFrame - run a DuckDB SQL query over the tables in `dfs`, registered
-          under their table_name.
-        - save(df, name="result") -> output_ref (str) - persists the FULL DataFrame to a new
-          Parquet file and returns its path. Call this whenever the objective needs the result
-          to exist afterward (CSV/dashboard/report), and report the returned output_ref in your
-          findings' artifact_refs. Only a small preview of what you saved is ever returned here
-          - never the full data.
+        Write only executable Python code.
 
-        Whatever your code prints via plain print() is captured but hard-truncated - prefer
-        preview()/describe() over raw print() for anything beyond a couple of values.
+        The execution environment already provides these globals.
+        The following variables and functions are ALREADY DEFINED in the global namespace:
 
-        Returns {stdout (possibly truncated), saved: [{output_ref, row_count, columns, preview},
-        ...] - one entry per save() call, error: traceback string or null}."""
+        Variables:
+        - dfs
+
+       Functions:
+        - describe(df)
+          Returns a summary of a DataFrame.
+
+        - preview(df)
+          Returns a preview of a DataFrame.
+
+        - sql(query)
+        Executes a SQL query and returns a pandas DataFrame.
+
+        - save(df, name)
+        Saves a DataFrame and returns its file_id.
+
+        Never import them.
+        Never redefine them.
+        Never write `from ... import ...` or `import ... as ...`.
+
+        Use them directly.
+
+        Persist reusable outputs with save().
+
+        AVAILABLE LIBRARIES - this sandbox only has these installed, nothing else:
+        - pandas (as `pd`) - numpy comes along with it as pandas' own dependency, so basic
+          numpy usage generally works, but it is not a supported/guaranteed part of this
+          environment - prefer pandas/DuckDB SQL over numpy where you have a choice.
+        - duckdb (as `duckdb`, wrapped by sql() above - you don't need to import or call it directly)
+
+        Do NOT import any library or module, only use the given functions.
+        """
         if self._sandbox is None:
             raise RuntimeError("no storage configured for this agent, cannot run the sandbox")
         for file_id in file_ids:
             self._check_assigned(file_id)
-        print(self.assigned_files)
-        tables = {self._table(fid): self.assigned_files[fid].output_ref for fid in file_ids}
+        tables = {self._table(fid): fid for fid in file_ids}
         try:
-            return self._sandbox.run(code, tables, self.workspace_id)
+            result = self._sandbox.run(code, tables, self.workspace_id)
         except SandboxExecutionError as exc:
             return {"stdout": "", "saved": [], "error": str(exc)}
+
+        # Recorded straight from the sandbox's own structured response - not the LLM's
+        # transcription of it - so TabularAgent.run() can later report real columns/dtypes/
+        # row_count/column_kinds for each save()'d artifact, not just its bare file_id. Keyed by
+        # file_id and never cleared between calls, so it also survives across multiple
+        # run_python calls within the same TabularTools instance (a multi-step analysis that
+        # saves more than once in one invoke_tabular_agent call).
+        for entry in result.get("saved") or []:
+            file_id = entry.get("file_id")
+            if file_id:
+                self.saved_artifacts[file_id] = entry
+        return result
+
+    # Kept in sync by hand with tools.reporting.models.ChartSpec.chart_type's Literal - not
+    # imported from there to avoid tools.tabular depending on tools.reporting for one constant,
+    # but the two MUST list the same values, since a visualization_plan entry is later passed
+    # straight into ChartSpec(**entry) unchanged (see generate_dashboard/_resolve_chart_spec in
+    # tools/orchestrator/orchestrator_tools.py).
+    _VALID_CHART_TYPES = {"bar", "line", "timeline", "scatter3d", "surface"}
+
+    def propose_visualization(
+        self,
+        file_id: str,
+        chart_type: str,
+        title: str,
+        label_column: Optional[str] = None,
+        value_columns: Optional[list] = None,
+        time_column: Optional[str] = None,
+        series_column: Optional[str] = None,
+        value_column: Optional[str] = None,
+        x_column: Optional[str] = None,
+        y_column: Optional[str] = None,
+        z_column: Optional[str] = None,
+    ) -> dict:
+        """Declare how ONE artifact you already save()'d should be charted, if the objective
+        calls for a visualization. You are the only one who knows this: you read the objective,
+        planned the query, and interpreted the result - the orchestrator only ever sees your
+        summary text and the artifact's raw columns, so if you don't say which column is the
+        category and which is the metric, it has to guess, and it WILL guess wrong. Call this
+        once per artifact that should become a chart, right after the run_python call that
+        save()'d it. Do not call this for an artifact that isn't meant to be visualized.
+
+        file_id: must be a real file_id this session's save() already returned - call
+        list_allowed_files/run_python first, never a guessed or invented id.
+
+        chart_type: one of "bar", "line", "timeline", "scatter3d", "surface".
+        - "bar"/"line": use label_column + value_columns for a single grouping column with one
+          or more numeric series; use label_column + series_column + value_column instead when
+          the result has TWO grouping columns and one metric (e.g. columns Region, Gender,
+          AverageAge -> label_column="Region", series_column="Gender", value_column="AverageAge").
+        - "timeline": time_column is required, plus either value_columns (wide: one series per
+          column) or series_column + value_column (long/tidy: one series per distinct value in
+          series_column).
+        - "scatter3d"/"surface": x_column, y_column, and z_column are all required.
+
+        Every *_column/value_columns argument must be an EXACT column name from that artifact
+        (as returned by save() / seen in this session's run_python results) - never a renamed,
+        abbreviated, or invented name. This call validates that for you and returns a clear error
+        (with the real column list) if you get one wrong, so fix it and call again rather than
+        guessing again.
+
+        title: a short, specific chart title (e.g. "Average Age per Region for Exited
+        Customers") - this is what the orchestrator will use verbatim, not the artifact's raw
+        file_id or table name.
+
+        Returns {"status": "recorded", "plan": {...}} on success, or {"error": "..."} explaining
+        exactly what to fix - this never raises, so a mistake here doesn't end your run early."""
+        if chart_type not in self._VALID_CHART_TYPES:
+            return {
+                "error": f"chart_type {chart_type!r} is not supported - choose one of "
+                         f"{sorted(self._VALID_CHART_TYPES)}.",
+            }
+
+        entry = self.saved_artifacts.get(file_id)
+        if entry is None:
+            return {
+                "error": f"file_id {file_id!r} was not save()'d by any run_python call yet in "
+                         f"this session. Call save(df, name) inside run_python first, then call "
+                         f"propose_visualization with the exact file_id it returned. Artifacts "
+                         f"saved so far: {sorted(self.saved_artifacts.keys())}",
+            }
+
+        columns = entry.get("columns") or []
+        named_single = {
+            "label_column": label_column, "time_column": time_column,
+            "series_column": series_column, "value_column": value_column,
+            "x_column": x_column, "y_column": y_column, "z_column": z_column,
+        }
+        bad = {arg: val for arg, val in named_single.items() if val and val not in columns}
+        for val in value_columns or []:
+            if val not in columns:
+                bad[f"value_columns={val!r}"] = val
+        if bad:
+            return {
+                "error": f"column(s) not found in artifact {file_id!r}: {bad} - the REAL columns "
+                         f"in this artifact are exactly: {columns}. Use one of these verbatim.",
+            }
+
+        missing = self._missing_chart_columns(
+            chart_type, label_column, value_columns, time_column, series_column, value_column,
+            x_column, y_column, z_column,
+        )
+        if missing:
+            return {"error": missing}
+
+        plan_entry = {"file_id": file_id, "chart_type": chart_type, "title": title}
+        for key, val in (
+            ("label_column", label_column), ("value_columns", value_columns),
+            ("time_column", time_column), ("series_column", series_column),
+            ("value_column", value_column), ("x_column", x_column),
+            ("y_column", y_column), ("z_column", z_column),
+        ):
+            if val:
+                plan_entry[key] = val
+
+        self.visualization_plan.append(plan_entry)
+        return {"status": "recorded", "plan": plan_entry}
+
+    @staticmethod
+    def _missing_chart_columns(
+        chart_type, label_column, value_columns, time_column, series_column, value_column,
+        x_column, y_column, z_column,
+    ) -> Optional[str]:
+        """Mirrors tools.reporting.models.ChartSpec's own docstring on which column combination
+        each chart_type actually needs - returns a human-readable (and model-readable) message
+        naming exactly what's missing, or None if the given combination is valid."""
+        if chart_type in ("bar", "line"):
+            wide = bool(label_column and value_columns)
+            tidy = bool(label_column and series_column and value_column)
+            if not (wide or tidy):
+                return (
+                    f"chart_type={chart_type!r} needs EITHER (label_column + value_columns) for "
+                    f"a single grouping column, OR (label_column + series_column + value_column) "
+                    f"for two grouping columns - got label_column={label_column!r}, "
+                    f"value_columns={value_columns!r}, series_column={series_column!r}, "
+                    f"value_column={value_column!r}."
+                )
+        elif chart_type == "timeline":
+            if not time_column:
+                return "chart_type='timeline' requires time_column to be set."
+            wide = bool(value_columns)
+            tidy = bool(series_column and value_column)
+            if not (wide or tidy):
+                return (
+                    "chart_type='timeline' needs time_column plus EITHER value_columns (one "
+                    "series per column) OR (series_column + value_column) (one series per "
+                    "distinct series_column value)."
+                )
+        elif chart_type in ("scatter3d", "surface"):
+            if not (x_column and y_column and z_column):
+                return (
+                    f"chart_type={chart_type!r} requires x_column, y_column, AND z_column all "
+                    f"set - got x_column={x_column!r}, y_column={y_column!r}, z_column={z_column!r}."
+                )
+        return None
 
     def inspect_schema(self, file_id: str) -> SchemaInfo:
         """Return column names, dtypes, nullability, and likely key columns for ALL columns of one
@@ -200,10 +393,10 @@ class TabularTools:
         Set persist=True whenever the objective needs the actual computed data to exist
         afterward (the user asked for this result as a CSV, dashboard, or report, not just an
         answer in words) - this writes the FULL result (not just the preview) to a new Parquet
-        file and returns its path as output_ref, which you should report in your findings'
-        artifact_refs. When persist=True, also pass name: a short, descriptive label for what's
-        in the result (e.g. "revenue_by_region"). Leave persist=False when you only need to see
-        the result yourself to answer in words."""
+        file and returns its file_id, which you should report in your findings' artifact_refs.
+        When persist=True, also pass name: a short, descriptive label for what's in the result
+        (e.g. "revenue_by_region"). Leave persist=False when you only need to see the result
+        yourself to answer in words."""
         for file_id in file_ids:
             self._check_assigned(file_id)
         preview_rows = max(1, min(preview_rows, 20))
@@ -216,9 +409,8 @@ class TabularTools:
                 clean_sql = clean_sql[:-1].rstrip()
 
             dataframe = self.con.execute(clean_sql).df()
-            safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name or "result")[:60] or "result"
-            result_id = f"{safe_name}_{uuid.uuid4().hex[:8]}"
-            output_ref = self.storage.write(dataframe, f"{self.workspace_id}/{result_id}.parquet")
+            file_id = new_artifact_id(name or "result")
+            self.storage.write(dataframe, f"{self.workspace_id}/{file_id}.parquet")
 
             row_count = len(dataframe)
             preview = dataframe.head(preview_rows).to_dict(orient="records")
@@ -228,11 +420,11 @@ class TabularTools:
                 row_count=row_count,
                 truncated=row_count > len(preview),
                 error=None,
-                output_ref=output_ref,
+                file_id=file_id,
             )
 
         result = run_query(self.con, sql, preview_rows, timeout_seconds)
-        return QueryResult(**result, output_ref=None)
+        return QueryResult(**result, file_id=None)
 
     def aggregate(
         self,
@@ -250,7 +442,7 @@ class TabularTools:
         query_data with raw SQL (CASE WHEN ... END, or FILTER (WHERE ...)) instead.
 
         Always persists the FULL aggregated result to a new Parquet file and returns only a
-        capped preview (up to 20 rows) plus output_ref, row_count, and truncated - never the
+        capped preview (up to 20 rows) plus file_id, row_count, and truncated - never the
         whole result set, regardless of how many groups it has. Pass `name`: a short label for
         what's in the result (e.g. "revenue_by_region")."""
         for file_id in file_ids:
@@ -276,9 +468,8 @@ class TabularTools:
             sql += f" GROUP BY {', '.join(self._quote_ident(col) for col in group_by)}"
 
         dataframe = self.con.execute(sql).df()
-        safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name or "aggregate")[:60] or "aggregate"
-        result_id = f"{safe_name}_{uuid.uuid4().hex[:8]}"
-        output_ref = self.storage.write(dataframe, f"{self.workspace_id}/{result_id}.parquet")
+        file_id = new_artifact_id(name or "aggregate")
+        self.storage.write(dataframe, f"{self.workspace_id}/{file_id}.parquet")
 
         row_count = len(dataframe)
         preview = dataframe.head(20).to_dict(orient="records")
@@ -288,7 +479,7 @@ class TabularTools:
             row_count=row_count,
             truncated=row_count > len(preview),
             error=None,
-            output_ref=output_ref,
+            file_id=file_id,
         )
 
     @staticmethod

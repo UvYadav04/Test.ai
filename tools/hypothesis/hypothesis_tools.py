@@ -1,6 +1,7 @@
 import json
 
 from llm_provider import LLMProvider
+from tools.hypothesis.config import get_model_config
 from tools.hypothesis.models import Hypothesis, HypothesisResult
 from tools.llm_call import ask_llm
 
@@ -22,8 +23,17 @@ Order hypotheses by priority, 1 = highest.
 
 
 class HypothesisTools:
-    def __init__(self, llm_provider=None):
-        self.llm_provider = llm_provider or LLMProvider()
+    def __init__(self, llm_provider=None, model: str = None):
+        if llm_provider is not None:
+            self.llm_provider = llm_provider
+            self.model = model
+        else:
+            # HYPOTHESIS_PROVIDER/HYPOTHESIS_MODEL - same per-agent override pattern as
+            # agents/tabular/config.py and agents/orchestrator/config.py. Falls back to
+            # DEFAULT_LLM_PROVIDER (LLMProvider's own default) if unset.
+            model_config = get_model_config()
+            self.llm_provider = LLMProvider(model_config["provider"])
+            self.model = model or model_config["model"]
 
     def generate_hypotheses(self, objective: str, context: dict, max_hypotheses: int = 5) -> HypothesisResult:
         files = context.get("available_files", [])
@@ -36,7 +46,7 @@ class HypothesisTools:
             max_hypotheses=max_hypotheses,
         )
 
-        client = self.llm_provider.get_client()
+        client = self.llm_provider.get_client(self.model)
         raw = ask_llm(client, prompt)
         data = json.loads(raw)
 

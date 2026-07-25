@@ -1,136 +1,23 @@
-"""Runs inside the sandbox container - never on the host. Loads the assigned parquet files as
-DataFrames, executes the model-generated code against a small set of guarded helpers, and writes
-a structured result.json for the host process to read back. This script has no network access
-(the container is started with networking disabled) and can only read/write under /data (a bind
-mount of the app's own parquet storage root) and /job (a per-run scratch directory)."""
-import contextlib
-import io
-import json
-import os
-import re
-import time
-import traceback
-import uuid
+"""SUPERSEDED - kept only as a pointer for anything still linking to this filename.
 
-import duckdb
-import pandas as pd
-import os
+This used to be the sandbox image's ENTRYPOINT: one fresh Docker container per run_python()
+call, running this script once, then exiting. It's been replaced by a persistent-sandbox
+architecture - one long-lived container per investigation, serving many run_python() calls over
+a warm process instead of paying container-create + Python-interpreter-boot + `import
+pandas/duckdb` on every single call. See:
 
-PREVIEW_CAP = 10
-MAX_STDOUT_CHARS = 500
+- execution_engine.py   - this file's exec()/dfs/describe/preview/sql/save logic, moved
+                           near-verbatim into ExecutionEngine, now callable many times per
+                           process instead of once-then-exit.
+- sandbox_server.py      - the new ENTRYPOINT (see Dockerfile): a FastAPI/Uvicorn server bound
+                           to a Unix Domain Socket, exposing ExecutionEngine over
+                           GET /health, POST /execute, POST /reset, POST /shutdown.
+- sandbox_manager.py     - host-side: creates/reuses one sandbox container per
+                           investigation_id, waits for /health, and cleans up on idle timeout
+                           or when the investigation ends.
+- ../tools/tabular/sandbox_executor.py - PythonSandbox, whose public run(code, tables,
+                           workspace_id) API is unchanged; it now talks to sandbox_manager.py
+                           instead of spinning up a container itself.
 
-
-def _ms(start: float) -> float:
-    return round((time.perf_counter() - start) * 1000, 1)
-
-
-def main():
-    # t0 is captured AFTER the `import duckdb`/`import pandas` at the top of this file have
-    # already run - those two imports are commonly 0.5-1.5s cold (numpy/duckdb's native libs
-    # loading), on top of the Python interpreter's own boot time. Neither is visible inside
-    # this timings dict for that reason: subtract total_runner_ms (below) from however long the
-    # HOST saw the container run for (sandbox_executor.py logs this separately) to get that
-    # import+interpreter-startup cost by elimination.
-
-    print("inside main execution")
-    t0 = time.perf_counter()
-    timings = {}
-
-    job_id = os.environ["JOB_ID"]
-
-    MANIFEST_PATH = f"/data/parquet/.sandbox_jobs/{job_id}/manifest.json"
-    RESULT_PATH = f"/data/parquet/.sandbox_jobs/{job_id}/result.json"
-    OUTPUT_ROOT = "/data/parquet"
-
-    with open(MANIFEST_PATH, encoding="utf-8") as f:
-        manifest = json.load(f)
-    timings["manifest_load_ms"] = _ms(t0)
-
-    t_tables = time.perf_counter()
-    dfs = {}
-    con = duckdb.connect(database=":memory:")
-    per_table_ms = {}
-    for table_name, path in manifest["tables"].items():
-        t_one = time.perf_counter()
-        df = pd.read_parquet(path)
-        dfs[table_name] = df
-        con.register(table_name, df)
-        per_table_ms[table_name] = _ms(t_one)
-    timings["table_load_ms"] = per_table_ms
-    timings["table_load_total_ms"] = _ms(t_tables)
-
-    saved = []
-
-    def describe(df):
-        """Schema/shape only - column names, dtypes, row/col count, null counts. No row data."""
-        return {
-            "columns": [str(c) for c in df.columns],
-            "dtypes": {str(c): str(df[c].dtype) for c in df.columns},
-            "shape": list(df.shape),
-            "null_counts": {str(c): int(n) for c, n in df.isnull().sum().items()},
-        }
-
-    def preview(df, n=5):
-        """Up to n rows (hard-capped at 50) as a list of dicts - use instead of print(df)."""
-        n = max(1, min(int(n), 10))
-        return json.loads(df.head(n).to_json(orient="records"))
-
-    def sql(query):
-        """Run a DuckDB SQL query over the tables in `dfs`, registered under their table_name."""
-        return con.execute(query).df()
-
-    def save(df, name="result"):
-        """Persist the FULL DataFrame to a new Parquet file under this workspace and return its
-        path. Only a small preview of what was saved is recorded for the caller - never the
-        full data."""
-        safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", str(name))[:60] or "result"
-        result_id = f"{safe_name}_{uuid.uuid4().hex[:8]}"
-        rel_path = os.path.join(manifest["workspace_id"], f"{result_id}.parquet")
-        full_path = os.path.join(OUTPUT_ROOT, rel_path)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        df.to_parquet(full_path, index=False)
-        saved.append({
-            "output_ref": full_path,
-            "row_count": int(len(df)),
-            "columns": [str(c) for c in df.columns],
-            "preview": preview(df, PREVIEW_CAP),
-        })
-        return full_path
-
-    namespace = {
-        "dfs": dfs,
-        "describe": describe,
-        "preview": preview,
-        "sql": sql,
-        "save": save,
-        "pd": pd,
-        "duckdb": duckdb,
-    }
-
-    t_exec = time.perf_counter()
-    buf = io.StringIO()
-    error = None
-    try:
-        with contextlib.redirect_stdout(buf):
-            exec(manifest["code"], namespace)  # noqa: S102 - sandboxed: no network, capped resources
-    except Exception:
-        error = traceback.format_exc()[-2000:]
-    # Includes every save() call the model-generated code made (to_parquet writes) - those
-    # aren't timed separately, they're wherever the code called them inside exec() above.
-    timings["exec_ms"] = _ms(t_exec)
-
-    stdout_text = buf.getvalue()
-    if len(stdout_text) > MAX_STDOUT_CHARS:
-        stdout_text = stdout_text[:MAX_STDOUT_CHARS] + "\n...[stdout truncated]"
-
-    # Captured just before the final write, not after - so it reflects "time spent doing work",
-    # not the write itself. sandbox_executor.py logs this alongside its own host-side timings.
-    timings["total_runner_ms"] = _ms(t0)
-
-    result = {"stdout": stdout_text, "saved": saved, "error": error, "timings": timings}
-    with open(RESULT_PATH, "w", encoding="utf-8") as f:
-        json.dump(result, f, default=str)
-
-
-if __name__ == "__main__":
-    main()
+Nothing imports this module - it isn't COPYd into the sandbox image anymore (see Dockerfile).
+"""

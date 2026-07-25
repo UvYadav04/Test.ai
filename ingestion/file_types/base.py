@@ -92,13 +92,18 @@ class SingleTableIngestor(BaseIngestor):
             if self.storage is None:
                 raise RuntimeError("no storage backend provided")
 
-            output_ref = self.storage.write(df, f"{workspace_id}/{file_id}.parquet")
+            # file_id is already this artifact's identity - the physical location is always
+            # {workspace_id}/{file_id}.parquet (see sandbox/path_resolver.py), so output_ref is
+            # just file_id itself now, never storage.write()'s return value (a full host path
+            # for LocalParquetStore, an R2 key for R2ParquetStore - two different shapes that
+            # used to leak straight through to the LLM and the sandbox).
+            self.storage.write(df, f"{workspace_id}/{file_id}.parquet")
 
             return IngestionResult(
                 file_id=file_id,
                 workspace_id=workspace_id,
                 status="success",
-                output_ref=output_ref,
+                output_ref=file_id,
                 schema_summary={"columns": list(df.columns), "dtypes": infer_dtypes(df)},
                 row_count=len(df),
             )

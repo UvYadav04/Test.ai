@@ -9,6 +9,7 @@ from typing import Optional
 
 import pandas as pd
 
+from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
 from tools.reporting.models import ChartSpec
 
 # Warm terracotta-led palette matching the app's own theme - primary accent first, then a mix
@@ -35,16 +36,16 @@ class ReportingTools:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-    def generate_csv(self, output_ref: str, name: Optional[str] = None) -> str:
-        """Convert an existing data artifact (an output_ref from a table_ref or from a
+    def generate_csv(self, workspace_id: str, file_id: str, name: Optional[str] = None) -> str:
+        """Convert an existing data artifact (a file_id from a table_ref or from a
         persisted query_data call) into a CSV file. Creates a new dated folder (today's date + name) and
         writes the CSV there, alongside a copy of the source data file, so the request's
         output is self-contained. Returns the CSV file path."""
         folder = self._new_folder(name, "export")
-        dataframe = self.storage.read(output_ref)
+        dataframe = self._read_dataframe(workspace_id, file_id)
         path = os.path.join(folder, "data.csv")
         dataframe.to_csv(path, index=False)
-        self._copy_source(output_ref, folder)
+        self._copy_source(workspace_id, file_id, folder)
         return path
 
     def generate_markdown_report(
@@ -79,16 +80,18 @@ class ReportingTools:
             f.write("\n".join(lines))
         return path
 
-    def generate_dashboard(self, title: str, sections: list[ChartSpec], name: Optional[str] = None) -> str:
+    def generate_dashboard(
+        self, workspace_id: str, title: str, sections: list[ChartSpec], name: Optional[str] = None,
+    ) -> str:
         """Build a single self-contained, polished, interactive HTML dashboard from one or more
         existing data artifacts. Use this when the user wants a visual dashboard, not a CSV or
         written report.
 
-        Each item in `sections` is a ChartSpec: {output_ref, chart_type, ...column names...}.
-        You never pass or see actual data values here - only an output_ref (a file path) and
-        column names you already know from a Tabular Agent's findings. The real numbers are
-        read straight from the parquet file when the dashboard is built; charts are laid out
-        automatically in a responsive grid regardless of how many sections you pass.
+        Each item in `sections` is a ChartSpec: {file_id, chart_type, ...column names...}.
+        You never pass or see actual data values here - only a file_id and column names you
+        already know from a Tabular Agent's findings. The real numbers are read straight from
+        the parquet file when the dashboard is built; charts are laid out automatically in a
+        responsive grid regardless of how many sections you pass.
 
         chart_type options and which column names each needs:
         - "bar" / "line" (2D): EITHER label_column + value_columns (1+ numeric series - if
@@ -109,8 +112,8 @@ class ReportingTools:
         rendered_sections = []
         for raw_spec in sections:
             spec = self._to_chart_spec(raw_spec)
-            dataframe = self.storage.read(spec.output_ref)
-            self._copy_source(spec.output_ref, folder)
+            dataframe = self._read_dataframe(workspace_id, spec.file_id)
+            self._copy_source(workspace_id, spec.file_id, folder)
             rendered_sections.append(self._render_section(dataframe, spec))
 
         html = self._render_html(title, rendered_sections, source_count=len(sections))
@@ -121,6 +124,7 @@ class ReportingTools:
 
     def generate_realtime_dashboard_bundle(
         self,
+        workspace_id: str,
         title: str,
         sections: list,
         transform_script: str,
@@ -132,10 +136,10 @@ class ReportingTools:
         needs to be independently refreshable/addressable as its own Chart doc (see
         shared/models/dashboard.py's ChartConfig) - plus a manifest.json describing
         everything needed to refresh the whole thing later with no LLM involvement:
-        transform_script (re-run wholesale against file_ids' CURRENT output_refs on every
-        refresh - see sandbox/runner.py, its `saved` list survives a mid-script exception)
-        and one config per chart (its ChartSpec fields plus the stable `name` its data gets
-        save()'d under inside transform_script).
+        transform_script (re-run wholesale against file_ids' CURRENT data on every refresh -
+        see sandbox/runner.py, its `saved` list survives a mid-script exception) and one config
+        per chart (its ChartSpec fields plus the stable `name` its data gets save()'d under
+        inside transform_script).
 
         Returns the manifest.json path, not an HTML path - worker_service/tasks/
         investigation.py's _persist_artifacts() recognizes that specific filename and turns
@@ -146,8 +150,8 @@ class ReportingTools:
 
         for index, raw_spec in enumerate(sections):
             spec = self._to_chart_spec(raw_spec)
-            dataframe = self.storage.read(spec.output_ref)
-            self._copy_source(spec.output_ref, folder)
+            dataframe = self._read_dataframe(workspace_id, spec.file_id)
+            self._copy_source(workspace_id, spec.file_id, folder)
             section = self._render_section(dataframe, spec)
 
             html_filename = f"chart_{index}.html"
@@ -208,8 +212,8 @@ class ReportingTools:
         if isinstance(raw, ChartSpec):
             return raw
         if isinstance(raw, str):
-            # backward-compatible shorthand: a bare output_ref string means an auto bar chart
-            return ChartSpec(output_ref=raw)
+            # backward-compatible shorthand: a bare file_id string means an auto bar chart
+            return ChartSpec(file_id=raw)
         return ChartSpec(**raw)
 
     def _new_folder(self, name: Optional[str], default_stem: str) -> str:
@@ -219,12 +223,20 @@ class ReportingTools:
         os.makedirs(folder, exist_ok=True)
         return folder
 
-    @staticmethod
-    def _copy_source(output_ref: str, folder: str) -> None:
+    def _artifact_path(self, workspace_id: str, file_id: str) -> str:
+        """The only place ReportingTools turns a file_id into an actual filesystem path -
+        never accepts or forwards a path from a caller."""
+        return get_parquet_path(self.storage.root_dir, workspace_id, file_id)
+
+    def _read_dataframe(self, workspace_id: str, file_id: str) -> pd.DataFrame:
+        return self.storage.read(self._artifact_path(workspace_id, file_id))
+
+    def _copy_source(self, workspace_id: str, file_id: str, folder: str) -> None:
         try:
-            if os.path.isfile(output_ref):
-                shutil.copy2(output_ref, folder)
-        except OSError:
+            path = self._artifact_path(workspace_id, file_id)
+            if os.path.isfile(path):
+                shutil.copy2(path, folder)
+        except (OSError, InvalidArtifactIdError):
             pass
 
     @staticmethod
@@ -234,9 +246,8 @@ class ReportingTools:
         return value
 
     @staticmethod
-    def _humanize(output_ref: str, fallback: str) -> str:
-        base = os.path.splitext(os.path.basename(str(output_ref)))[0]
-        base = _HEX_SUFFIX_RE.sub("", base)
+    def _humanize(file_id: str, fallback: str) -> str:
+        base = _HEX_SUFFIX_RE.sub("", str(file_id))
         base = re.sub(r"[_-]+", " ", base).strip()
         return base.title() if base else fallback
 
@@ -285,8 +296,8 @@ class ReportingTools:
         return {
             "kind": "chartjs",
             "chart_type": spec.chart_type,
-            "title": spec.title or cls._humanize(spec.output_ref, "Chart"),
-            "source": os.path.basename(str(spec.output_ref)),
+            "title": spec.title or cls._humanize(spec.file_id, "Chart"),
+            "source": str(spec.file_id),
             "row_count": len(dataframe),
             "x_label": x_label,
             "y_label": y_label,
@@ -324,8 +335,8 @@ class ReportingTools:
         return {
             "kind": "chartjs",
             "chart_type": "line",
-            "title": spec.title or cls._humanize(spec.output_ref, "Timeline"),
-            "source": os.path.basename(str(spec.output_ref)),
+            "title": spec.title or cls._humanize(spec.file_id, "Timeline"),
+            "source": str(spec.file_id),
             "row_count": len(df),
             "x_label": spec.time_column,
             "y_label": y_label,
@@ -338,8 +349,8 @@ class ReportingTools:
         if not (spec.x_column and spec.y_column and spec.z_column):
             raise ValueError(f"chart_type '{spec.chart_type}' requires x_column, y_column, and z_column")
         df = dataframe.head(2000)
-        title = spec.title or cls._humanize(spec.output_ref, "3D Chart")
-        source = os.path.basename(str(spec.output_ref))
+        title = spec.title or cls._humanize(spec.file_id, "3D Chart")
+        source = str(spec.file_id)
 
         if spec.chart_type == "surface":
             pivot = df.pivot_table(

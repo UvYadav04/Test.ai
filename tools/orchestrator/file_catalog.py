@@ -26,6 +26,17 @@ class FileCatalog:
         return [e for e in self.entries.values() if is_browsable(e)]
 
 
+def is_tabular_output_ref(output_ref: str) -> bool:
+    """True when `output_ref` is a real parquet-backed artifact (its value is now the file_id
+    itself - see sandbox/path_resolver.py / outputref-vulnerability-audit.md, which removed
+    output_ref-as-a-path everywhere in the tabular pipeline) rather than the "" xlsx-workbook
+    main-entry sentinel or the "workspace_{id}" PDF/TXT vector-store pointer. Still a
+    string-shape heuristic, not a real type tag (spec gap #8) - kept as the one shared place
+    that heuristic lives, instead of duplicated inline in is_browsable and
+    OrchestratorTools._to_tabular_file_ref like it used to be."""
+    return bool(output_ref) and not output_ref.startswith("workspace_")
+
+
 def is_browsable(entry) -> bool:
     """Whether a catalog entry should be surfaced through list_files/search_files/list_tables
     and OrchestratorAgent._context_brief's per-turn catalog summary, as opposed to being
@@ -59,7 +70,7 @@ def is_browsable(entry) -> bool:
         return "from_xlsx" in (entry.tags or [])
     if entry.file_type in ("pdf", "txt"):
         return True
-    return bool(entry.output_ref) and entry.output_ref.endswith(".parquet")
+    return is_tabular_output_ref(entry.output_ref)
 
 
 def table_catalog_entry(table: dict, *, source_id: str, source_filename: str,

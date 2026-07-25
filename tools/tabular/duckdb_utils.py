@@ -1,23 +1,26 @@
-import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import duckdb
+
+from sandbox.path_resolver import get_parquet_path, get_table_path
+
+# Re-exported for backward compatibility - get_table_path (sandbox/path_resolver.py) is now the
+# single canonical (file_id -> SQL identifier) mapping, shared with ArtifactStore-style callers.
+safe_view_name = get_table_path
 
 
 def connect():
     return duckdb.connect(database=":memory:")
 
 
-def safe_view_name(file_id: str) -> str:
-    name = re.sub(r"[^0-9a-zA-Z_]", "_", file_id)
-    if not name or name[0].isdigit():
-        name = f"t_{name}"
-    return name
-
-
-def register_view(con, file_id: str, output_ref: str) -> str:
-    view_name = safe_view_name(file_id)
-    con.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{output_ref}')")
+def register_view(con, file_id: str, workspace_id: str, root_dir: str) -> str:
+    """Registers a DuckDB view over the parquet artifact identified by (workspace_id, file_id)
+    - never a caller-supplied path. The path interpolated into SQL below is always one this
+    process built itself from validated ids (get_parquet_path raises InvalidArtifactIdError on
+    anything else), not a string handed in from a tool call or a database record."""
+    view_name = get_table_path(file_id)
+    parquet_path = get_parquet_path(root_dir, workspace_id, file_id)
+    con.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{parquet_path}')")
     return view_name
 
 

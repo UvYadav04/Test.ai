@@ -70,7 +70,10 @@ class XLSXIngestor(BaseIngestor):
                     dataframe = table["dataframe"]
                     table_file_id = f"{file_id}_table_{len(extracted_tables)}"
 
-                    output_ref = self.storage.write(dataframe, f"{workspace_id}/{table_file_id}.parquet")
+                    # output_ref == table_file_id now, not storage.write()'s return value - see
+                    # the note in ingestion/file_types/base.py's ingest().
+                    self.storage.write(dataframe, f"{workspace_id}/{table_file_id}.parquet")
+                    output_ref = table_file_id
                     columns = [str(c) for c in dataframe.columns]
                     location = f"{sheet_name} - table {sheet_index + 1}" if multi else sheet_name
 

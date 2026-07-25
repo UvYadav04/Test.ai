@@ -1,3 +1,5 @@
+import logging
+import time
 from abc import ABC, abstractmethod
 
 import requests
@@ -6,6 +8,8 @@ from config import get_settings
 
 DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 HF_INFERENCE_URL = "https://api-inference.huggingface.co/models/{model}"
+
+logger = logging.getLogger("vectordb.reranker")
 
 
 class BaseReranker(ABC):
@@ -36,6 +40,7 @@ class CrossEncoderReranker(BaseReranker):
         if not chunks:
             return []
 
+        start = time.perf_counter()
         payload = {
             "inputs": [{"text": query, "text_pair": chunk.text} for chunk in chunks],
             "options": {"wait_for_model": True},
@@ -51,6 +56,10 @@ class CrossEncoderReranker(BaseReranker):
 
         scores = [self._extract_score(r) for r in results]
         ranked = [c for _, c in sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)]
+        logger.info(
+            "reranker call took %.3fs (%d chunks in, %d returned)",
+            time.perf_counter() - start, len(chunks), len(ranked[:top_k] if top_k else ranked),
+        )
         return ranked[:top_k] if top_k else ranked
 
     @staticmethod
