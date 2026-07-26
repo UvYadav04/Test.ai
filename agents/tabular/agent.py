@@ -8,7 +8,7 @@ from autogen_core import CancellationToken
 
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
-from agents.tabular.config import SYSTEM_MESSAGE, get_model_config
+from agents.tabular.config import get_model_config, get_system_message
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider
 from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
@@ -19,12 +19,14 @@ from tools.tabular.tabular_tools import TabularTools
 class TabularAgent:
     def __init__(
         self, assigned_files: list, storage=None, workspace_id: str = "default",
-        investigation_id: str = "default", sandbox_manager=None,
+        investigation_id: str = "default", sandbox_manager=None, direct_route: bool = False,
+        reports_dir: str = "data/reports",
     ):
         self.logger = get_agent_logger("tabular_agent")
         self.tools = TabularTools(
             assigned_files, storage=storage, workspace_id=workspace_id,
             investigation_id=investigation_id, sandbox_manager=sandbox_manager,
+            reports_dir=reports_dir,
         )
         model_config = get_model_config()
         client = LLMProvider(model_config["provider"]).get_client(model_config["model"])
@@ -35,9 +37,12 @@ class TabularAgent:
             tools=[
                 self.tools.list_allowed_files,
                 self.tools.run_python,
-                self.tools.propose_visualization,
+                self.tools.create_visualizations,
             ],
-            system_message=SYSTEM_MESSAGE,
+            # direct_route=True when the controller routed straight here (bypassing the
+            # Orchestrator) - see worker_service/tasks/investigation.py's _run_tabular_direct
+            # and agents/tabular/config.py's DIRECT_ROUTE_ADDENDUM for what that changes.
+            system_message=get_system_message(direct_route),
             reflect_on_tool_use=False,
             max_tool_iterations=10,
         )
@@ -68,7 +73,7 @@ class TabularAgent:
         # invoke_tabular_agent constructs a new TabularAgent every call) so these are already
         # empty - reset explicitly anyway for symmetry with the above, in case that ever changes.
         self.tools.saved_artifacts = {}
-        self.tools.visualization_plan = []
+        self.tools.charts_created = []
 
         constraints = constraints or {}
         allowed_files = self.tools.list_allowed_files()
@@ -102,18 +107,20 @@ class TabularAgent:
 
         self.logger.info("tabular agent run took %.3fs", time.perf_counter() - run_start)
         real_refs = self._real_refs(self._extract_refs(transcript, "file_id"))
+        # self.tools.charts_created was populated by create_visualizations() calls that already
+        # rendered and saved each chart for real (see TabularTools) - unlike real_refs above,
+        # there's no LLM-transcription trust issue to filter against here: a chart_created entry
+        # only exists because TabularTools itself confirmed the source artifact was really
+        # save()'d and then actually wrote the chart file, not because the model claimed so.
+        # Each entry's "location" rides along in artifact_refs so worker_service's existing
+        # artifact-persistence pipeline (_persist_artifacts) uploads it and creates a Chart doc
+        # exactly like it already does for generate_csv/generate_markdown_report output.
+        chart_locations = [entry["location"] for entry in self.tools.charts_created]
         return TabularFindings(
             summary=final_text,
-            artifact_refs=real_refs,
+            artifact_refs=real_refs + chart_locations,
             artifact_metadata=self._artifact_metadata(real_refs),
-            # self.tools.visualization_plan was populated by validated propose_visualization()
-            # calls (see TabularTools) - restricted to real_refs here so a visualization_plan
-            # entry never outlives/outreaches the artifact_refs this findings object is actually
-            # vouching for (e.g. a scratch intermediate the model saved but didn't end up
-            # reporting as a real output).
-            visualization_plan=[
-                entry for entry in self.tools.visualization_plan if entry.get("file_id") in real_refs
-            ],
+            charts=list(self.tools.charts_created),
         )
 
     def _artifact_metadata(self, real_refs: list) -> dict:
@@ -194,7 +201,7 @@ class TabularAgent:
     _FRIENDLY_TOOL_NAMES = {
         "list_allowed_files": "Listing files",
         "run_python": "Executing a Python script",
-        "propose_visualization": "Planning a visualization",
+        "create_visualizations": "Generating visualizations",
     }
 
     _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))

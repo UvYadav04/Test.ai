@@ -27,6 +27,7 @@ CORE_TOOLS = [
     "generate_hypotheses",
     "invoke_tabular_agent",
     "invoke_document_agent",
+    "invoke_document_processor",
 ]
 
 # capability name -> {"tools": [OrchestratorTools method names], "description": one-line
@@ -41,10 +42,20 @@ CAPABILITY_TOOLS: dict[str, dict] = {
         "tools": ["generate_markdown_report"],
         "description": "write a synthesized markdown report file",
     },
-    "dashboard": {
-        "tools": ["generate_dashboard"],
-        "description": "build a chart dashboard file from existing data artifacts",
-    },
+    # "dashboard" (generate_dashboard - persistent/auto-refreshing dashboards) is DISABLED for
+    # now: invoke_tabular_agent's own create_visualizations tool already covers every chart need,
+    # and the real-time/refreshable dashboard feature is redundant on top of that at the moment.
+    # Uncomment to re-enable - orchestrator_tools.generate_dashboard and the underlying
+    # ReportingTools.generate_realtime_dashboard_bundle/worker_service refresh_dashboard job are
+    # both left fully intact, just unreachable while this entry stays commented out.
+    # "dashboard": {
+    #     "tools": ["generate_dashboard"],
+    #     "description": (
+    #         "build a persistent, auto-refreshing dashboard from the most recent tabular "
+    #         "analysis - NOT for an ordinary chart, which invoke_tabular_agent already produces "
+    #         "on its own"
+    #     ),
+    # },
 }
 
 

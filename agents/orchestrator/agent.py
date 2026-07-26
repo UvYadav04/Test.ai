@@ -110,7 +110,7 @@ class InvestigationCancelled(Exception):
 class OrchestratorAgent:
     def __init__(
         self, catalog, vector_store=None, reranker=None, memory=None, storage=None,
-        reports_dir: str = "data/reports",
+        reports_dir: str = "data/reports", investigation_id: str = "default", sandbox_manager=None,
     ):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
@@ -127,7 +127,7 @@ class OrchestratorAgent:
 
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
-            reports_dir=reports_dir,
+            reports_dir=reports_dir, investigation_id=investigation_id, sandbox_manager=sandbox_manager,
         )
         self.model_client = client
 
@@ -380,9 +380,10 @@ class OrchestratorAgent:
         "generate_hypotheses": "Generating hypotheses",
         "invoke_tabular_agent": "Assigning an agent",
         "invoke_document_agent": "Assigning an agent",
+        "invoke_document_processor": "Assigning an agent",
         "generate_csv": "Exporting a CSV",
         "generate_markdown_report": "Writing a report",
-        "generate_dashboard": "Building a dashboard",
+        "generate_dashboard": "Building a real-time dashboard",
         "get_current_date": "Checking today's date",
         "recall_user_info": "Recalling saved preferences",
         "store_user_info": "Saving a preference",

@@ -4,7 +4,7 @@ import time
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
-from agents.document.config import SYSTEM_MESSAGE, get_model_config
+from agents.document.config import get_model_config, get_system_message
 from agents.events import make_tool_call_translator
 from agents.logger import get_agent_logger, log_event
 from agents.timing import ToolCallTimer
@@ -12,11 +12,11 @@ from llm_provider import LLMProvider, get_settings
 from tools.document.document_tools import DocumentTools
 from tools.orchestrator.models import DocumentFindings
 from vectordb.chroma_store import ChromaVectorStore
-from vectordb.reranker import CrossEncoderReranker
+from vectordb.reranker import DeepInfraReranker
 
 
 class DocumentAgent:
-    def __init__(self, assigned_files: list, vector_store=None, reranker=None):
+    def __init__(self, assigned_files: list, vector_store=None, reranker=None, direct_route: bool = False):
         self.logger = get_agent_logger("document_agent")
         model_config = get_model_config()
         # See orchestrator/agent.py's comment on FALLBACK_LLM_PROVIDER - same reasoning here.
@@ -26,7 +26,7 @@ class DocumentAgent:
 
         vector_store = vector_store or ChromaVectorStore()
         if reranker is None:
-            reranker = CrossEncoderReranker()
+            reranker = DeepInfraReranker()
 
         self.tools = DocumentTools(assigned_files, vector_store, reranker=reranker, llm_provider=provider)
 
@@ -47,26 +47,27 @@ class DocumentAgent:
                 self.tools.list_tables,
                 self.tools.search_tables,
                 self.tools.get_table,
-                self.tools.broad_scan,
             ],
-            system_message=SYSTEM_MESSAGE,
+            # direct_route=True when the controller routed straight here (bypassing the
+            # Orchestrator) - see worker_service/tasks/investigation.py's _run_document_direct
+            # and agents/document/config.py's DIRECT_ROUTE_ADDENDUM for what that changes.
+            system_message=get_system_message(direct_route),
             reflect_on_tool_use=False,
             max_tool_iterations=10,
         )
 
-    async def run(self, objective: str, constraints: dict = None, on_event=None) -> DocumentFindings:
-        """`on_event`, if given, is an `async def on_event(event: dict) -> None` -
-        forwarded here from OrchestratorTools.invoke_document_agent so this
-        agent's OWN tool calls (search_documents, get_chunk, ...) also
-        surface on the live activity panel, not just "Assigning an agent"
-        with nothing in between until it returns."""
+    async def run(
+        self, objective: str, constraints: dict = None, on_event=None, metadata_brief: str = None,
+    ) -> DocumentFindings:
+
         await self.agent.on_reset(CancellationToken())
 
         constraints = constraints or {}
         task = (
             f"Objective: {objective}\n"
             f"Assigned file_ids: {self.tools.assigned_file_ids}\n"
-            f"Constraints: {constraints}"
+            f"Constraints: {constraints}\n\n"
+            f"{self._metadata_section(metadata_brief)}"
         )
         self.logger.info("objective sent to agent: %s", task)
 
@@ -99,6 +100,17 @@ class DocumentAgent:
         )
 
     @staticmethod
+    def _metadata_section(metadata_brief: str | None) -> str:
+        if not metadata_brief:
+            return ""
+        return (
+            "Document metadata (already retrieved deterministically - do NOT call "
+            "get_file_overview or list_file_sections/list_tables again just to re-learn this, "
+            "use your first real tool call for the actual objective instead):\n"
+            f"{metadata_brief}"
+        )
+
+    @staticmethod
     def _transcript_line(event) -> str:
         event_type = type(event).__name__
         if event_type == "ToolCallRequestEvent":
@@ -123,7 +135,6 @@ class DocumentAgent:
         "list_tables": "Listing tables",
         "search_tables": "Searching tables",
         "get_table": "Getting table metadata",
-        "broad_scan": "Scanning documents",
     }
 
     _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))

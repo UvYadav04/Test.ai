@@ -1,6 +1,8 @@
 from typing import Optional
 
 from sandbox.path_resolver import new_artifact_id
+from tools.reporting.models import ChartSpec
+from tools.reporting.reporting_tools import ReportingTools
 from tools.tabular.duckdb_utils import connect, register_view, run_query
 from tools.tabular.models import (
     ColumnProfile,
@@ -17,7 +19,7 @@ from tools.tabular.sandbox_executor import PythonSandbox, SandboxExecutionError
 class TabularTools:
     def __init__(
         self, assigned_files: list, storage=None, workspace_id: str = "default",
-        investigation_id: str = "default", sandbox_manager=None,
+        investigation_id: str = "default", sandbox_manager=None, reports_dir: str = "data/reports",
     ):
         self.assigned_files = {f.file_id: f for f in assigned_files}
         self.con = connect()
@@ -25,6 +27,12 @@ class TabularTools:
         self.workspace_id = workspace_id
         self.investigation_id = investigation_id
         self.root_dir = getattr(storage, "root_dir", None)
+        # Same ReportingTools every other chart/report/dashboard renderer uses (see
+        # tools/orchestrator/orchestrator_tools.py) - create_visualizations below delegates the
+        # actual chart rendering/file-writing to it (render_single_chart) rather than
+        # reimplementing that here, so there's exactly one place that knows how to turn a
+        # ChartSpec + dataframe into an HTML file.
+        self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
         self.table_names = {}
         for file_ref in assigned_files:
             # register_view resolves (workspace_id, file_id) -> parquet path itself via
@@ -51,11 +59,14 @@ class TabularTools:
         # last_transform_file_ids) to attach real columns/dtypes/row_count to what it reports
         # back to the orchestrator, instead of the orchestrator only ever seeing a bare file_id.
         self.saved_artifacts: dict = {}
-        # Validated visualization intent this instance's propose_visualization() calls have
-        # recorded - see that method. Read off this object by TabularAgent.run() the same way as
-        # saved_artifacts above, and attached to the returned TabularFindings as
-        # visualization_plan.
-        self.visualization_plan: list = []
+        # Metadata for every chart this instance's create_visualizations() calls have actually
+        # rendered and saved to disk (see that method) - each entry already a REAL, existing HTML
+        # file, not a plan. Read off this object by TabularAgent.run() the same way as
+        # saved_artifacts above: its "location" values get merged into TabularFindings.
+        # artifact_refs (so worker_service's existing _persist_artifacts uploads them and creates
+        # Chart docs with no further code needed), and the entries themselves are attached as
+        # TabularFindings.charts for the orchestrator to mention in its final answer.
+        self.charts_created: list = []
 
     def _check_assigned(self, file_id: str) -> None:
         if file_id not in self.assigned_files:
@@ -91,7 +102,10 @@ class TabularTools:
         return files
 
     def run_python(self, code: str, file_ids: list) -> dict:
-        """ Execute Python code in an isolated sandbox.
+        """ 
+        Execute Python code in an isolated sandbox. Pass file ids to be used. 
+
+        Use table name for accessing the dataframe.
 
         Write only executable Python code.
 
@@ -152,74 +166,159 @@ class TabularTools:
                 self.saved_artifacts[file_id] = entry
         return result
 
-    # Kept in sync by hand with tools.reporting.models.ChartSpec.chart_type's Literal - not
-    # imported from there to avoid tools.tabular depending on tools.reporting for one constant,
-    # but the two MUST list the same values, since a visualization_plan entry is later passed
-    # straight into ChartSpec(**entry) unchanged (see generate_dashboard/_resolve_chart_spec in
-    # tools/orchestrator/orchestrator_tools.py).
+    # Kept as a plain set (rather than derived from ChartSpec's Literal via typing.get_args) so
+    # an unsupported chart_type gets a clear, specific error message here instead of a dataclass
+    # TypeError - but the two MUST list the same values by hand, since _validate_chart_request
+    # below passes validated kwargs straight into ChartSpec(**kwargs) unchanged.
     _VALID_CHART_TYPES = {"bar", "line", "timeline", "scatter3d", "surface"}
 
-    def propose_visualization(
-        self,
-        file_id: str,
-        chart_type: str,
-        title: str,
-        label_column: Optional[str] = None,
-        value_columns: Optional[list] = None,
-        time_column: Optional[str] = None,
-        series_column: Optional[str] = None,
-        value_column: Optional[str] = None,
-        x_column: Optional[str] = None,
-        y_column: Optional[str] = None,
-        z_column: Optional[str] = None,
-    ) -> dict:
-        """Declare how ONE artifact you already save()'d should be charted, if the objective
-        calls for a visualization. You are the only one who knows this: you read the objective,
-        planned the query, and interpreted the result - the orchestrator only ever sees your
-        summary text and the artifact's raw columns, so if you don't say which column is the
-        category and which is the metric, it has to guess, and it WILL guess wrong. Call this
-        once per artifact that should become a chart, right after the run_python call that
-        save()'d it. Do not call this for an artifact that isn't meant to be visualized.
+    def create_visualizations(self, visualizations: list[dict]) -> dict:
+        """Validate, generate, and save charts for one or more artifacts you already save()'d -
+        in a SINGLE call. Pass every chart the objective needs at once (one dict per chart in
+        `visualizations`) rather than calling this more than once per run; if you already know
+        every chart you need before calling this, save every artifact first, then make one
+        create_visualizations call with all of them together.
 
-        file_id: must be a real file_id this session's save() already returned - call
-        list_allowed_files/run_python first, never a guessed or invented id.
+        You are the only one who knows how each artifact should be charted: you read the
+        objective, planned the query, and interpreted the result - nobody downstream ever sees
+        the raw data, so if you don't say which column is the category and which is the metric,
+        nobody else can work it out correctly afterward.
 
-        chart_type: one of "bar", "line", "timeline", "scatter3d", "surface".
-        - "bar"/"line": use label_column + value_columns for a single grouping column with one
-          or more numeric series; use label_column + series_column + value_column instead when
-          the result has TWO grouping columns and one metric (e.g. columns Region, Gender,
-          AverageAge -> label_column="Region", series_column="Gender", value_column="AverageAge").
-        - "timeline": time_column is required, plus either value_columns (wide: one series per
-          column) or series_column + value_column (long/tidy: one series per distinct value in
-          series_column).
-        - "scatter3d"/"surface": x_column, y_column, and z_column are all required.
+        Each item in `visualizations` is a dict with:
+        - file_id (required): a real file_id this session's save() already returned - call
+          list_allowed_files/run_python first, never a guessed or invented id.
+        - chart_type (required): one of "bar", "line", "timeline", "scatter3d", "surface".
+          - "bar"/"line": label_column + value_columns for a single grouping column with one or
+            more numeric series; or label_column + series_column + value_column when the result
+            has TWO grouping columns and one metric (e.g. columns Region, Gender, AverageAge ->
+            label_column="Region", series_column="Gender", value_column="AverageAge").
+          - "timeline": time_column is required, plus either value_columns (wide: one series per
+            column) or series_column + value_column (long/tidy: one series per distinct value in
+            series_column).
+          - "scatter3d"/"surface": x_column, y_column, and z_column are all required.
+        - title (required): a short, specific chart title (e.g. "Average Age per Region for
+          Exited Customers") - this is what gets shown verbatim, not the artifact's file_id.
+        - label_column/value_columns/time_column/series_column/value_column/x_column/y_column/
+          z_column (optional, chart_type-dependent, see above): must be EXACT column names from
+          that artifact (as returned by save() / seen in this session's run_python results) -
+          never a renamed, abbreviated, or invented name.
 
-        Every *_column/value_columns argument must be an EXACT column name from that artifact
-        (as returned by save() / seen in this session's run_python results) - never a renamed,
-        abbreviated, or invented name. This call validates that for you and returns a clear error
-        (with the real column list) if you get one wrong, so fix it and call again rather than
-        guessing again.
+        Every visualization request is validated and generated INDEPENDENTLY - one bad request
+        (an unsupported chart_type, a file_id never save()'d this session, a wrong column name, a
+        missing required column for that chart_type) returns an error for THAT chart only and
+        never prevents the others in the same call from being generated. This never raises, so a
+        mistake in one entry doesn't end your run early.
 
-        title: a short, specific chart title (e.g. "Average Age per Region for Exited
-        Customers") - this is what the orchestrator will use verbatim, not the artifact's raw
-        file_id or table name.
-
-        Returns {"status": "recorded", "plan": {...}} on success, or {"error": "..."} explaining
-        exactly what to fix - this never raises, so a mistake here doesn't end your run early."""
-        if chart_type not in self._VALID_CHART_TYPES:
+        Returns {"status": "success"|"partial_error"|"error", "charts": [...], "errors": [...]}.
+        Each successful entry in "charts" has artifact_file_id, chart_id, chart_type, title, and
+        location (the chart's saved file) - it's already generated and will be attached to the
+        final answer automatically, you don't need to do anything else with it, just mention it
+        in your summary. Each entry in "errors" has the request's index, requested_file_id (if
+        available), and an "error" message explaining exactly what to fix."""
+        if self.reporting is None:
             return {
-                "error": f"chart_type {chart_type!r} is not supported - choose one of "
-                         f"{sorted(self._VALID_CHART_TYPES)}.",
+                "status": "error", "charts": [],
+                "errors": [{"error": "no storage configured for this agent, cannot generate charts"}],
             }
+
+        charts = []
+        errors = []
+        for index, raw in enumerate(visualizations or []):
+            # NOTE: this key is deliberately "requested_file_id", not "file_id" - TabularAgent.
+            # run()'s _extract_refs regex-scans this tool's own RESULT line for a literal
+            # `"file_id": "..."` shape to recover real artifact ids from run_python/query_data
+            # results. Using "file_id" here too would let a failed chart request's (possibly
+            # perfectly real) file_id leak into that extraction as a false positive.
+            requested_file_id = raw.get("file_id") if isinstance(raw, dict) else None
+            try:
+                spec_kwargs, error = self._validate_chart_request(raw)
+            except Exception as exc:
+                spec_kwargs, error = None, f"invalid visualization request: {exc}"
+
+            if error:
+                errors.append({"index": index, "requested_file_id": requested_file_id, "error": error})
+                continue
+
+            try:
+                chart_id = new_artifact_id(f"chart_{spec_kwargs['chart_type']}")
+                # worker_service's _persist_artifacts recovers a chart's DB title from its
+                # containing folder's name (see investigation.py's _artifact_title), so the
+                # folder name should stay recognizable - but two charts in this SAME batch can
+                # easily share (or nearly share) a title, and _new_folder would then put both in
+                # the identical dated folder, silently overwriting one chart.html with the
+                # other's before persistence even runs. chart_id (always unique - see
+                # new_artifact_id) goes first so it survives _new_folder's 60-char truncation
+                # regardless of how long the title is, guaranteeing two charts never collide.
+                folder_name = f"{chart_id}_{spec_kwargs['title'][:30]}"
+                location = self.reporting.render_single_chart(
+                    self.workspace_id, ChartSpec(**spec_kwargs), name=folder_name,
+                )
+            except Exception as exc:
+                errors.append({
+                    "index": index, "requested_file_id": requested_file_id,
+                    "error": f"chart generation failed: {exc}",
+                })
+                continue
+
+            chart_entry = {
+                "artifact_file_id": spec_kwargs["file_id"],
+                "chart_id": chart_id,
+                "chart_type": spec_kwargs["chart_type"],
+                "title": spec_kwargs["title"],
+                "location": location,
+            }
+            self.charts_created.append(chart_entry)
+            charts.append(chart_entry)
+
+        if not visualizations:
+            status = "error"
+            errors = errors or [{"error": "visualizations must be a non-empty list of chart requests"}]
+        elif charts and not errors:
+            status = "success"
+        elif charts and errors:
+            status = "partial_error"
+        else:
+            status = "error"
+
+        return {"status": status, "charts": charts, "errors": errors}
+
+    def _validate_chart_request(self, raw) -> tuple:
+        """Returns (spec_kwargs, None) for a valid chart request, or (None, error_message)
+        otherwise - the same checks the old single-chart propose_visualization used to make per
+        call, factored out so create_visualizations can run them independently for each item in
+        a batch without one bad entry aborting the rest."""
+        if not isinstance(raw, dict):
+            return None, f"each visualization request must be an object/dict, got {type(raw).__name__}"
+
+        file_id = raw.get("file_id")
+        chart_type = raw.get("chart_type")
+        title = raw.get("title")
+        label_column = raw.get("label_column")
+        value_columns = raw.get("value_columns")
+        time_column = raw.get("time_column")
+        series_column = raw.get("series_column")
+        value_column = raw.get("value_column")
+        x_column = raw.get("x_column")
+        y_column = raw.get("y_column")
+        z_column = raw.get("z_column")
+
+        if not file_id:
+            return None, "file_id is required"
+        if not title:
+            return None, "title is required"
+        if chart_type not in self._VALID_CHART_TYPES:
+            return None, (
+                f"chart_type {chart_type!r} is not supported - choose one of "
+                f"{sorted(self._VALID_CHART_TYPES)}."
+            )
 
         entry = self.saved_artifacts.get(file_id)
         if entry is None:
-            return {
-                "error": f"file_id {file_id!r} was not save()'d by any run_python call yet in "
-                         f"this session. Call save(df, name) inside run_python first, then call "
-                         f"propose_visualization with the exact file_id it returned. Artifacts "
-                         f"saved so far: {sorted(self.saved_artifacts.keys())}",
-            }
+            return None, (
+                f"file_id {file_id!r} was not save()'d by any run_python call yet in this "
+                f"session. Call save(df, name) inside run_python first, then pass the exact "
+                f"file_id it returned. Artifacts saved so far: {sorted(self.saved_artifacts.keys())}"
+            )
 
         columns = entry.get("columns") or []
         named_single = {
@@ -232,19 +331,19 @@ class TabularTools:
             if val not in columns:
                 bad[f"value_columns={val!r}"] = val
         if bad:
-            return {
-                "error": f"column(s) not found in artifact {file_id!r}: {bad} - the REAL columns "
-                         f"in this artifact are exactly: {columns}. Use one of these verbatim.",
-            }
+            return None, (
+                f"column(s) not found in artifact {file_id!r}: {bad} - the REAL columns in this "
+                f"artifact are exactly: {columns}. Use one of these verbatim."
+            )
 
         missing = self._missing_chart_columns(
             chart_type, label_column, value_columns, time_column, series_column, value_column,
             x_column, y_column, z_column,
         )
         if missing:
-            return {"error": missing}
+            return None, missing
 
-        plan_entry = {"file_id": file_id, "chart_type": chart_type, "title": title}
+        spec_kwargs = {"file_id": file_id, "chart_type": chart_type, "title": title}
         for key, val in (
             ("label_column", label_column), ("value_columns", value_columns),
             ("time_column", time_column), ("series_column", series_column),
@@ -252,10 +351,9 @@ class TabularTools:
             ("y_column", y_column), ("z_column", z_column),
         ):
             if val:
-                plan_entry[key] = val
+                spec_kwargs[key] = val
 
-        self.visualization_plan.append(plan_entry)
-        return {"status": "recorded", "plan": plan_entry}
+        return spec_kwargs, None
 
     @staticmethod
     def _missing_chart_columns(

@@ -22,17 +22,6 @@ Claim: {claim}
 Does the chunk text support the claim? Answer with SUPPORTED or NOT_SUPPORTED, then a pipe |, then a one sentence reason.
 """
 
-BROAD_SCAN_PROMPT = """You are scanning one section of a longer document to help with this request:
-{focus}
-
-Read this section and write down whatever is relevant to that request - a summary point, a
-possible problem, an anomaly, a key fact - whatever the request actually needs. If nothing in
-this section is relevant, say so in one short line. Be concise.
-
-Document section (pages {page_range}):
-{batch_text}
-"""
-
 EXPAND_QUERY_PROMPT = """A user asked this question about a document:
 {objective}
 
@@ -73,10 +62,11 @@ class DocumentTools:
         )
 
     def get_file_overview(self, file_id: str) -> FileOverview:
-        """Orient yourself on a file before doing anything else: its sections, its tables, and
-        a quick list of key topics (from section headings). Call this first for most
-        objectives on a file you haven't looked at yet, the same way you'd skim a table of
-        contents before reading a report."""
+        """Sections, tables, and a quick list of key topics (from section headings) for one
+        file. Your task message already includes this level of detail for every assigned file
+        (see the "Document metadata" block) - don't call this again just to re-derive it. Only
+        reach for this mid-investigation if you need a fresher/deeper look at one specific file
+        than the initial brief gave you."""
         sections = self.list_file_sections(file_id)
         tables = self.list_tables(file_id)
         key_topics = [s.section_title for s in sections if s.section_title][:10]
@@ -212,32 +202,6 @@ class DocumentTools:
         if not chunks:
             raise ValueError(f"table_ref '{table_ref}' not found")
         return self._to_table_info(chunks[0])
-
-    def broad_scan(self, file_id: str, focus: str, batch_size: int = 8) -> str:
-        """Read an entire file section by section (not just a similarity-ranked slice) and
-        collect what's relevant to focus from every section, in order. Use this instead of
-        search_documents when the objective needs the WHOLE document considered - e.g.
-        "summarize this file", "is anything wrong in this file", "find any anomalies" - cases
-        where top-k semantic search could easily miss parts of the document. Slower and costs
-        more tokens than search_documents, so only reach for it when full-document coverage is
-        actually needed. Returns each section's findings concatenated, tagged with page ranges,
-        for you to synthesize into a final answer."""
-        chunks = self.vector_store.get_by_filter({"file_id": file_id})
-        chunks.sort(key=lambda c: c.metadata.get("chunk_index", 0))
-
-        client = self.llm_provider.get_client()
-        results = []
-        for start in range(0, len(chunks), batch_size):
-            batch = chunks[start:start + batch_size]
-            batch_text = "\n\n".join(c.text for c in batch)
-            pages = sorted({c.metadata.get("page", 0) for c in batch})
-            page_range = f"{pages[0]}-{pages[-1]}" if pages else "unknown"
-
-            prompt = BROAD_SCAN_PROMPT.format(focus=focus, page_range=page_range, batch_text=batch_text)
-            output = ask_llm(client, prompt)
-            results.append(f"[pages {page_range}]\n{output}")
-
-        return "\n\n".join(results)
 
     def verify_chunk_supports_claim(self, chunk_id: str, claim: str) -> VerificationResult:
         """Check whether a specific chunk's text actually supports a claim (returns

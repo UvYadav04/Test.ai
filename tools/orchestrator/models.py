@@ -34,18 +34,16 @@ class TabularFindings:
     # column_kinds hints alongside the file_id, instead of only a bare id it would otherwise
     # have to re-inspect via another tool round trip.
     artifact_metadata: dict = field(default_factory=dict)
-    # Analysis SEMANTICS, not just schema: which column is the category/axis, which is the
-    # metric, what chart type fits, what to title it - things only the Tabular Agent actually
-    # knows (it read the objective, planned the query, and interpreted the result; the
-    # orchestrator never sees any of that). Populated only via TabularTools.propose_visualization
-    # (see there) - a real, validated tool call the model makes, never inferred from summary text
-    # or column names after the fact. Each entry is a plain dict using EXACTLY
-    # tools.reporting.models.ChartSpec's field names (file_id, chart_type, title, label_column,
-    # value_columns, time_column, series_column, value_column, x_column, y_column, z_column) -
-    # deliberately, so the orchestrator can pass entries from this list straight through as
-    # generate_dashboard's `sections` argument with zero translation/reinterpretation. Empty when
-    # the objective didn't call for a chart, or the model judged nothing here needs one.
-    visualization_plan: list = field(default_factory=list)
+    # Metadata for charts that have ALREADY been generated and saved - not a plan for the
+    # orchestrator to act on. Populated only via TabularTools.create_visualizations (see there),
+    # which validates, renders, and saves each chart itself; each entry's "location" is also
+    # folded into artifact_refs above so worker_service's existing artifact-persistence pipeline
+    # (see worker_service/tasks/investigation.py's _persist_artifacts) uploads it and creates a
+    # Chart doc with no dashboard/chart-generation step of its own. The orchestrator only reads
+    # this to know what to mention in its final answer (chart_id, artifact_file_id, chart_type,
+    # title, location per chart) - it never generates, validates, or lays out charts itself.
+    # Empty when the objective didn't call for a chart, or the model judged nothing here needs one.
+    charts: list = field(default_factory=list)
 
 
 @dataclass

@@ -8,6 +8,8 @@ from agents.tabular import TabularAgent
 from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path, validate_segment
 from tools.hypothesis.hypothesis_tools import HypothesisTools
 from tools.hypothesis.models import HypothesisResult
+from tools.document.document_processor import DocumentProcessor
+from tools.document.metadata import build_document_metadata_brief
 from tools.orchestrator.file_catalog import is_tabular_output_ref
 from tools.orchestrator.memory import LongTermMemory
 from tools.orchestrator.models import FileRef, InvestigationEvent
@@ -15,7 +17,7 @@ from tools.reporting.models import ChartSpec
 from tools.reporting.reporting_tools import ReportingTools
 from tools.tabular.models import FileRef as TabularFileRef
 from vectordb.chroma_store import ChromaVectorStore
-from vectordb.reranker import CrossEncoderReranker
+from vectordb.reranker import DeepInfraReranker
 
 
 def _looks_like_file_id(ref: str) -> bool:
@@ -49,6 +51,11 @@ class OrchestratorTools:
         self.memory = memory or LongTermMemory()
         self.hypothesis_tools = HypothesisTools()
         self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
+        # Forwarded to every TabularAgent this orchestrator delegates to (see
+        # invoke_tabular_agent below) so its own create_visualizations tool renders charts into
+        # the same reports scratch space generate_csv/generate_markdown_report/generate_dashboard
+        # already use here.
+        self.reports_dir = reports_dir
         # Set per-run by OrchestratorAgent.run() (there's no `run` call on
         # this class itself to hand it in through). Forwarded into the
         # delegated Tabular/Document agent's own run() so its tool calls
@@ -57,7 +64,7 @@ class OrchestratorTools:
         self.on_event = None
         # Most recent tabular run_python call's code/file_ids, captured off the
         # TabularAgent instance after each invoke_tabular_agent call - see the note
-        # there. Only read by generate_dashboard(real_time=True).
+        # there. Only read by generate_dashboard (persistent/refreshable dashboards).
         self._last_transform_script: Optional[str] = None
         self._last_tabular_file_ids: list = []
 
@@ -168,17 +175,19 @@ class OrchestratorTools:
             Set must_export=True whenever the user needs reusable outputs (e.g. CSV,
             dashboard, or report).
 
-            The returned findings may include visualization_plan: pre-worked-out chart
-            sections (file_id, chart_type, title, and the right column names) for artifacts the
-            Tabular Agent judged should be visualized. If you're building a dashboard from this
-            call's output, pass visualization_plan straight to generate_dashboard's `sections` -
-            see that tool's own docstring."""
+            If the objective calls for a chart, the Tabular Agent generates and saves it itself
+            (via its own create_visualizations tool) as part of this same call - you don't
+            generate, validate, or lay out charts yourself. The returned findings' `charts` field
+            already lists every chart it made (chart_id, artifact_file_id, chart_type, title,
+            location) - just mention them in your final answer; no further tool call is needed to
+            produce or attach them."""
         constraints = constraints or {}
         self.state.selected_files.extend(f.file_id for f in assigned_files)
         tabular_files = [self._to_tabular_file_ref(f) for f in assigned_files]
         agent = TabularAgent(
             tabular_files, storage=self.storage, workspace_id=self.workspace_id,
             investigation_id=self.investigation_id, sandbox_manager=self.sandbox_manager,
+            reports_dir=self.reports_dir,
         )
 
         effective_objective = objective
@@ -192,11 +201,10 @@ class OrchestratorTools:
         result = await agent.run(effective_objective, constraints, on_event=self.on_event)
 
         # Stashed off the agent object itself (not part of `result`/TabularFindings - see
-        # TabularAgent.__init__'s note) so generate_dashboard(real_time=True) can find the
-        # script that produced this call's data without it ever entering the orchestrator
-        # LLM's own context. Each invoke_tabular_agent call overwrites this - a real-time
-        # dashboard's sections must all come from the SAME (most recent) tabular call, see
-        # generate_dashboard's docstring.
+        # TabularAgent.__init__'s note) so generate_dashboard can find the script that produced
+        # this call's data without it ever entering the orchestrator LLM's own context. Each
+        # invoke_tabular_agent call overwrites this - a real-time dashboard's sections must all
+        # come from the SAME (most recent) tabular call, see generate_dashboard's docstring.
         if agent.last_transform_script:
             self._last_transform_script = agent.last_transform_script
             self._last_tabular_file_ids = agent.last_transform_file_ids
@@ -220,16 +228,65 @@ class OrchestratorTools:
         return result
 
     async def invoke_document_agent(self, objective: str, assigned_files: list[FileRef], constraints: Optional[dict] = None):
-        """Delegate a document-investigation question to the Document Agent, scoped only to
-        the given assigned_files. It runs its own RAG tool-calling loop (search, verify, broad
-        scans, table discovery) in an isolated context and returns one compact
-        DocumentFindings - you never see its raw chunks. Use for PDF/text content: summaries,
-        facts, quotes, or finding which tables exist in a document."""
+        """Delegate a TARGETED document question to the Document Agent, scoped only to the
+        given assigned_files. It runs its own RAG tool-calling loop (search, verify, table
+        discovery) in an isolated context and returns one compact DocumentFindings - you never
+        see its raw chunks. Use for a specific fact, quote, section-specific question, or
+        finding which tables exist in a document.
+
+        Do NOT use this for whole-document tasks (summarize, explain, executive summary, key
+        takeaways, find anomalies/risks, extract action items, FAQ, insights) - use
+        invoke_document_processor for those instead."""
         constraints = constraints or {}
         self.state.selected_files.extend(f.file_id for f in assigned_files)
-        agent = DocumentAgent(assigned_files, vector_store=self._get_vector_store(), reranker=self._get_reranker())
-        result = await agent.run(objective, constraints, on_event=self.on_event)
+        vector_store = self._get_vector_store()
+        # Deterministic backend lookup (catalog + vector store), never an LLM tool call - see
+        # tools/document/metadata.py. Lets the agent's first real reasoning step be the
+        # objective itself instead of a get_file_overview() call to learn this.
+        metadata_brief = build_document_metadata_brief(
+            self.catalog, vector_store, [f.file_id for f in assigned_files],
+        )
+        agent = DocumentAgent(assigned_files, vector_store=vector_store, reranker=self._get_reranker())
+        result = await agent.run(objective, constraints, on_event=self.on_event, metadata_brief=metadata_brief)
         self._record_event("document", objective, result)
+        return result
+
+    async def invoke_document_processor(
+        self,
+        objective: str,
+        assigned_files: list[FileRef],
+        constraints: Optional[dict] = None,
+    ):
+        """Deterministic whole-document analysis.
+
+        Use this instead of `invoke_document_agent` whenever the user's request
+        requires understanding the entire assigned document(s), not retrieving
+        specific information.
+
+        Examples:
+        - Summarize or explain a document
+        - Generate an executive summary or key takeaways
+        - Find anomalies, risks, or insights
+        - Extract action items
+        - Any other whole-document analysis
+
+        Do NOT use this for targeted questions, keyword lookups, section-specific
+        queries, or iterative investigations. Use `invoke_document_agent` instead.
+
+        `objective` is a free-form instruction written by the orchestrator. It is
+        passed directly to the analysis model, so make it clear, specific, and
+        complete.
+
+        The processor automatically receives metadata for assigned documents,
+        retrieves all chunks in order, processes them in token-limited batches,
+        merges the intermediate results, and performs one final LLM call to produce
+        the final response.
+        """
+        constraints = constraints or {}
+        self.state.selected_files.extend(f.file_id for f in assigned_files)
+        processor = DocumentProcessor(assigned_files, vector_store=self._get_vector_store())
+        result = await processor.run(objective, constraints, on_event=self.on_event)
+        self._record_event("document_processor", objective, result)
         return result
 
     def generate_hypotheses(self, objective: str, context: dict, max_hypotheses: int = 5) -> HypothesisResult:
@@ -273,44 +330,37 @@ class OrchestratorTools:
             raise RuntimeError("no storage configured, cannot generate files")
         return self.reporting.generate_markdown_report(title, objective, summary, findings, open_questions, name)
 
-    def generate_dashboard(
-        self, title: str, sections: list[ChartSpec], name: Optional[str] = None, real_time: bool = False,
-    ) -> str:
-        """Build a dashboard from one or more data artifacts.
+    def generate_dashboard(self, title: str, sections: list[ChartSpec], name: Optional[str] = None) -> str:
+        """Build a PERSISTENT, auto-refreshing dashboard - use this only when the user explicitly
+        wants something that stays live/updated over time (e.g. "keep this dashboard updated",
+        "a live view of X"), not for an ordinary chart in your answer. An ordinary chart request
+        is already handled entirely by invoke_tabular_agent's own create_visualizations tool (see
+        its docstring) with no action needed from you here - do not call generate_dashboard for
+        that case.
 
-            Use when the user requests a dashboard or visualizations, not a CSV or
-            written report.
+        Requires a preceding invoke_tabular_agent call THIS investigation (it must have run
+        run_python) - the dashboard is built from that call's saved data and stays refreshable
+        against it later with no LLM involvement (see shared/models/dashboard.py).
 
-            If invoke_tabular_agent's result for the artifact(s) you're using included a
-            visualization_plan, pass those entries here as `sections` VERBATIM - each one is
-            already a complete, validated ChartSpec-shaped dict (file_id, chart_type, title, and
-            the right column names for that chart_type), worked out by the Tabular Agent from
-            the actual objective and data, not by you guessing from column names. Only build your
-            own sections from scratch when visualization_plan was empty.
+        Each section is a ChartSpec containing a file_id, chart_type, and the
+        required column names:
+        - bar/line: label_column + value_column(s), or label_column + series_column + value_column
+        - timeline: time_column + value_column(s), or time_column + series_column + value_column
+        - scatter3d/surface: x_column, y_column, z_column
 
-            Each section is a ChartSpec containing a file_id, chart_type, and the
-            required column names:
-            - bar/line: label_column + value_column(s), or label_column + series_column + value_column
-            - timeline: time_column + value_column(s), or time_column + series_column + value_column
-            - scatter3d/surface: x_column, y_column, z_column
-
-            Returns the generated dashboard path."""
+        Returns the generated dashboard's manifest path."""
         if self.reporting is None:
             raise RuntimeError("no storage configured, cannot generate files")
 
-        resolved_sections = [self._resolve_chart_spec(section) for section in sections]
-
-        if not real_time:
-            return self.reporting.generate_dashboard(self.workspace_id, title, resolved_sections, name)
-
         if not self._last_transform_script:
             raise RuntimeError(
-                "generate_dashboard was called with real_time=True, but no invoke_tabular_agent "
-                "call this investigation captured a run_python script to make it refreshable. "
-                "Call invoke_tabular_agent first (it must run run_python), then generate_dashboard "
-                "with real_time=True right after, using file_ids from that same call."
+                "generate_dashboard requires a preceding invoke_tabular_agent call THIS "
+                "investigation that ran run_python, so the dashboard can stay refreshable "
+                "against the same script/file_ids later. Call invoke_tabular_agent first, then "
+                "generate_dashboard right after."
             )
 
+        resolved_sections = [self._resolve_chart_spec(section) for section in sections]
         return self.reporting.generate_realtime_dashboard_bundle(
             self.workspace_id, title, resolved_sections, self._last_transform_script,
             self._last_tabular_file_ids, name,
@@ -419,5 +469,5 @@ class OrchestratorTools:
 
     def _get_reranker(self):
         if self._reranker is None:
-            self._reranker = CrossEncoderReranker()
+            self._reranker = DeepInfraReranker()
         return self._reranker

@@ -80,44 +80,22 @@ class ReportingTools:
             f.write("\n".join(lines))
         return path
 
-    def generate_dashboard(
-        self, workspace_id: str, title: str, sections: list[ChartSpec], name: Optional[str] = None,
-    ) -> str:
-        """Build a single self-contained, polished, interactive HTML dashboard from one or more
-        existing data artifacts. Use this when the user wants a visual dashboard, not a CSV or
-        written report.
+    def render_single_chart(self, workspace_id: str, spec: ChartSpec, name: Optional[str] = None) -> str:
+        """Render ONE chart to its own standalone HTML file, in its own fresh folder (never
+        shared with another chart's folder). Used by TabularTools.create_visualizations to
+        generate/save each chart in a batch independently - worker_service's _persist_artifacts
+        deletes a chart's whole containing folder once it's uploaded (shutil.rmtree on
+        os.path.dirname(ref)), so two charts sharing one folder would have one wipe out the
+        other's still-unprocessed file. Giving every chart its own folder sidesteps that with no
+        change needed to the persistence code.
 
-        Each item in `sections` is a ChartSpec: {file_id, chart_type, ...column names...}.
-        You never pass or see actual data values here - only a file_id and column names you
-        already know from a Tabular Agent's findings. The real numbers are read straight from
-        the parquet file when the dashboard is built; charts are laid out automatically in a
-        responsive grid regardless of how many sections you pass.
-
-        chart_type options and which column names each needs:
-        - "bar" / "line" (2D): EITHER label_column + value_columns (1+ numeric series - if
-          omitted, the first non-numeric column and up to 5 numeric columns are used
-          automatically) OR, for data with two grouping columns and one metric, label_column +
-          series_column + value_column (one bar/line per distinct series_column value, grouped
-          along label_column).
-        - "timeline" (line chart over time): time_column (required) plus EITHER value_columns
-          (wide data - one series per column) OR series_column + value_column (long/tidy data -
-          one series per distinct value in series_column).
-        - "scatter3d" / "surface" (3 dimensions): x_column, y_column, z_column (all required).
-          "surface" needs every (x, y) combination present in the data to build a valid grid -
-          use "scatter3d" instead if that can't be guaranteed.
-
-        Creates a new dated folder (today's date + name, falling back to a slug of title) and
-        writes the dashboard there, alongside copies of every source data file that fed it."""
-        folder = self._new_folder(name or title, "dashboard")
-        rendered_sections = []
-        for raw_spec in sections:
-            spec = self._to_chart_spec(raw_spec)
-            dataframe = self._read_dataframe(workspace_id, spec.file_id)
-            self._copy_source(workspace_id, spec.file_id, folder)
-            rendered_sections.append(self._render_section(dataframe, spec))
-
-        html = self._render_html(title, rendered_sections, source_count=len(sections))
-        path = os.path.join(folder, "dashboard.html")
+        Returns the HTML file's local path; also copies the source parquet alongside it."""
+        folder = self._new_folder(name or spec.title, "chart")
+        dataframe = self._read_dataframe(workspace_id, spec.file_id)
+        self._copy_source(workspace_id, spec.file_id, folder)
+        section = self._render_section(dataframe, spec)
+        html = self._render_html(section["title"], [section], source_count=1)
+        path = os.path.join(folder, "chart.html")
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         return path
@@ -132,9 +110,9 @@ class ReportingTools:
         name: Optional[str] = None,
     ) -> str:
         """Build a real-time dashboard bundle: one small standalone HTML file per chart -
-        deliberately NOT one combined page like generate_dashboard() above, since each chart
-        needs to be independently refreshable/addressable as its own Chart doc (see
-        shared/models/dashboard.py's ChartConfig) - plus a manifest.json describing
+        deliberately NOT one combined page, since each chart needs to be independently
+        refreshable/addressable as its own Chart doc (see shared/models/dashboard.py's
+        ChartConfig) - plus a manifest.json describing
         everything needed to refresh the whole thing later with no LLM involvement:
         transform_script (re-run wholesale against file_ids' CURRENT data on every refresh -
         see sandbox/runner.py, its `saved` list survives a mid-script exception) and one config
@@ -187,9 +165,8 @@ class ReportingTools:
 
     @classmethod
     def _render_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
-        """Shared by generate_dashboard (combined page) and
-        generate_realtime_dashboard_bundle (one page per chart) - dispatches to the right
-        _*_section builder for spec.chart_type."""
+        """Shared by render_single_chart and generate_realtime_dashboard_bundle (both one page
+        per chart) - dispatches to the right _*_section builder for spec.chart_type."""
         if spec.chart_type in ("bar", "line"):
             return cls._categorical_section(dataframe, spec)
         if spec.chart_type == "timeline":
