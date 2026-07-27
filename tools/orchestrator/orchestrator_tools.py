@@ -12,7 +12,7 @@ from tools.document.document_processor import DocumentProcessor
 from tools.document.metadata import build_document_metadata_brief
 from tools.orchestrator.file_catalog import is_tabular_output_ref
 from tools.orchestrator.memory import LongTermMemory
-from tools.orchestrator.models import FileRef, InvestigationEvent
+from tools.orchestrator.models import FileRef, FinalResultCollector, InvestigationEvent
 from tools.reporting.models import ChartSpec
 from tools.reporting.reporting_tools import ReportingTools
 from tools.tabular.models import FileRef as TabularFileRef
@@ -32,9 +32,16 @@ class OrchestratorTools:
     def __init__(
         self, catalog, state, vector_store=None, reranker=None, memory=None, storage=None,
         reports_dir: str = "data/reports", investigation_id: str = "default", sandbox_manager=None,
+        result_collector: FinalResultCollector = None,
     ):
         self.catalog = catalog
         self.state = state
+        # Defaults to a fresh, throwaway collector if the caller doesn't hand one in (e.g. a
+        # test constructing OrchestratorTools directly) - real runs always get one threaded down
+        # from worker_service.tasks.investigation.run_investigation via OrchestratorAgent, see
+        # its own __init__. Every invoke_*/generate_* method below registers into this directly,
+        # right when its own result comes back - see FinalResultCollector's docstring for why.
+        self.result_collector = result_collector or FinalResultCollector()
         self.storage = storage
         self.workspace_id = "default"
         # Handed straight through to invoke_tabular_agent -> TabularAgent -> TabularTools ->
@@ -146,17 +153,13 @@ class OrchestratorTools:
         now = datetime.now(timezone.utc)
         return {"today": now.date().isoformat(), "weekday": now.strftime("%A")}
 
-    def store_user_info(self, info: str) -> None:
-        """Save a long-term user fact or preference.
-
-        Use for information that should persist across conversations, not
-        temporary or task-specific details."""
-        self.memory.remember(info)
-
     def recall_user_info(self) -> list:
-        """Retrieve every fact previously saved with store_user_info, from any past session.
-        Call this early if the user's request might be affected by something they told you
-        before."""
+        """Retrieve every long-term user fact/preference saved from any past session (see
+        worker_service.tasks.investigation.update_chat_memory, which extracts these
+        automatically after each completed turn - there is no explicit "save" tool anymore).
+        This is already precomputed into your task prompt at the start of every investigation
+        (see OrchestratorAgent._context_brief) - call this again only if you need to double-check
+        it mid-run."""
         return self.memory.recall_all()
 
     async def invoke_tabular_agent(
@@ -224,6 +227,13 @@ class OrchestratorTools:
                 )
             result.artifact_refs = valid_refs
 
+        # Registered here (after the must_export filtering above, so a fabricated ref never
+        # gets in) rather than deferred to run()'s final return - this survives regardless of
+        # whether the orchestrator makes more tool calls after this one, or the run eventually
+        # raises before ever reaching a final answer. See FinalResultCollector's docstring.
+        self.result_collector.add_tabular_findings(
+            result, "invoke_tabular_agent", [f.file_id for f in assigned_files],
+        )
         self._record_event("tabular", objective, result)
         return result
 
@@ -248,6 +258,9 @@ class OrchestratorTools:
         )
         agent = DocumentAgent(assigned_files, vector_store=vector_store, reranker=self._get_reranker())
         result = await agent.run(objective, constraints, on_event=self.on_event, metadata_brief=metadata_brief)
+        self.result_collector.add_document_findings(
+            result, "invoke_document_agent", [f.file_id for f in assigned_files],
+        )
         self._record_event("document", objective, result)
         return result
 
@@ -286,6 +299,9 @@ class OrchestratorTools:
         self.state.selected_files.extend(f.file_id for f in assigned_files)
         processor = DocumentProcessor(assigned_files, vector_store=self._get_vector_store())
         result = await processor.run(objective, constraints, on_event=self.on_event)
+        self.result_collector.add_document_findings(
+            result, "invoke_document_processor", [f.file_id for f in assigned_files],
+        )
         self._record_event("document_processor", objective, result)
         return result
 
@@ -309,7 +325,9 @@ class OrchestratorTools:
         CSV file path."""
         if self.reporting is None:
             raise RuntimeError("no storage configured, cannot generate files")
-        return self.reporting.generate_csv(self.workspace_id, self._resolve_file_id(file_id), name)
+        path = self.reporting.generate_csv(self.workspace_id, self._resolve_file_id(file_id), name)
+        self.result_collector.add_artifact(path, kind="report", format="csv", source_tool="generate_csv")
+        return path
 
     def generate_markdown_report(
         self,
@@ -328,7 +346,11 @@ class OrchestratorTools:
         artifact_refs."""
         if self.reporting is None:
             raise RuntimeError("no storage configured, cannot generate files")
-        return self.reporting.generate_markdown_report(title, objective, summary, findings, open_questions, name)
+        path = self.reporting.generate_markdown_report(title, objective, summary, findings, open_questions, name)
+        self.result_collector.add_artifact(
+            path, kind="report", format="markdown", source_tool="generate_markdown_report",
+        )
+        return path
 
     def generate_dashboard(self, title: str, sections: list[ChartSpec], name: Optional[str] = None) -> str:
         """Build a PERSISTENT, auto-refreshing dashboard - use this only when the user explicitly
@@ -361,10 +383,14 @@ class OrchestratorTools:
             )
 
         resolved_sections = [self._resolve_chart_spec(section) for section in sections]
-        return self.reporting.generate_realtime_dashboard_bundle(
+        manifest_path = self.reporting.generate_realtime_dashboard_bundle(
             self.workspace_id, title, resolved_sections, self._last_transform_script,
             self._last_tabular_file_ids, name,
         )
+        self.result_collector.add_artifact(
+            manifest_path, kind="dashboard_bundle", source_tool="generate_dashboard",
+        )
+        return manifest_path
 
     def _known_artifact_refs(self) -> list:
         """Every real file_id this investigation has actually produced so far - pulled from

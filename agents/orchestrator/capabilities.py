@@ -18,7 +18,6 @@ costing prompt tokens on every turn it isn't needed.
 CORE_TOOLS = [
     "get_current_date",
     "recall_user_info",
-    "store_user_info",
     "list_files",
     "search_files",
     "get_file_details",

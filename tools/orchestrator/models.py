@@ -62,6 +62,85 @@ class InvestigationEvent:
 
 
 @dataclass
+class FinalResultCollector:
+    """Accumulates everything a sub-agent/tool call has actually produced during ONE
+    investigation, updated immediately as each call's result comes back - not re-derived at the
+    end from LLM transcript text, and not lost just because a LATER tool call in the same run
+    raises. Created once per investigation (worker_service.tasks.investigation.run_investigation)
+    and threaded down through OrchestratorAgent -> OrchestratorTools, and separately into the
+    direct-route helpers (_run_tabular_direct/_run_document_direct) so every producing call -
+    invoke_tabular_agent, invoke_document_agent, invoke_document_processor,
+    generate_csv/generate_markdown_report/generate_dashboard, or a direct-routed
+    TabularAgent/DocumentAgent - registers here right when its own result comes back, regardless
+    of what the orchestrator does afterward or whether the run eventually crashes.
+
+    Kept as three separate lists (not one flat artifact_refs) so a consumer never has to re-guess
+    "is this a chart or a report" from a file extension the way worker_service used to:
+    - chart_paths: local HTML paths for charts already rendered (TabularTools.
+      create_visualizations output). Each entry: {type: "chart", location, chart_id, chart_type,
+      title, artifact_file_id, source_tool}.
+    - artifacts: everything else this investigation actually produced - reports (csv/markdown),
+      a real-time dashboard's manifest.json, a saved tabular data artifact, or a table_ref
+      surfaced by a Document agent. Each entry: {type: "report"|"dashboard_bundle"|"table"|
+      "document_artifact", ref, source_tool, ...extra metadata}.
+    - files_used: file_ids this investigation actually read from, for the "these files were
+      used" chips the client shows under an assistant message.
+
+    Deliberately dumb (dict bags, not typed dataclasses per entry) - the shape each tool needs to
+    attach varies (a chart has chart_type/title, a CSV export doesn't), and nothing downstream
+    needs more than dict access.
+    """
+
+    chart_paths: list = field(default_factory=list)
+    artifacts: list = field(default_factory=list)
+    files_used: list = field(default_factory=list)
+
+    def add_chart(self, location: str, **meta) -> None:
+        if not location or any(c["location"] == location for c in self.chart_paths):
+            return
+        self.chart_paths.append({"type": "chart", "location": location, **meta})
+
+    def add_artifact(self, ref: str, kind: str, **meta) -> None:
+        if not ref or any(a["ref"] == ref for a in self.artifacts):
+            return
+        self.artifacts.append({"type": kind, "ref": ref, **meta})
+
+    def add_files_used(self, file_ids: list) -> None:
+        for file_id in file_ids or []:
+            if file_id and file_id not in self.files_used:
+                self.files_used.append(file_id)
+
+    def add_tabular_findings(self, findings, source_tool: str, assigned_file_ids: list) -> None:
+        """Shared by OrchestratorTools.invoke_tabular_agent and worker_service's
+        _run_tabular_direct (the direct-route path bypasses the Orchestrator/OrchestratorTools
+        entirely) so both register a TabularFindings the exact same way. findings.charts entries
+        are already confirmed-rendered (see TabularTools.create_visualizations) - never trust an
+        LLM transcription of them. findings.artifact_refs also includes each chart's own
+        location (see TabularAgent.run()'s note) - skipped here since add_chart already covers
+        it, so a chart is never double-registered as a "table" artifact too."""
+        self.add_files_used(assigned_file_ids)
+        chart_locations = set()
+        for chart in findings.charts:
+            chart_locations.add(chart["location"])
+            self.add_chart(
+                chart["location"], chart_id=chart["chart_id"], chart_type=chart["chart_type"],
+                title=chart["title"], artifact_file_id=chart.get("artifact_file_id"),
+                source_tool=source_tool,
+            )
+        for ref in findings.artifact_refs:
+            if ref in chart_locations:
+                continue
+            self.add_artifact(ref, kind="table", source_tool=source_tool)
+
+    def add_document_findings(self, findings, source_tool: str, assigned_file_ids: list) -> None:
+        """Shared by OrchestratorTools.invoke_document_agent/invoke_document_processor and
+        worker_service's _run_document_direct - same reasoning as add_tabular_findings above."""
+        self.add_files_used(assigned_file_ids)
+        for ref in findings.artifact_refs:
+            self.add_artifact(ref, kind="document_artifact", source_tool=source_tool)
+
+
+@dataclass
 class InvestigationState:
     session_id: str
     objective: str
@@ -90,6 +169,18 @@ class InvestigationState:
 @dataclass
 class OrchestratorResult:
     final_answer: str
-    artifact_refs: list = field(default_factory=list)
-    open_questions: list = field(default_factory=list)
+    # Typed, straight off a FinalResultCollector (see above) - chart_paths/artifacts are kept
+    # separate rather than flattened, so worker_service's persistence step never has to re-guess
+    # "chart vs report vs dashboard" from a file extension.
+    chart_paths: list = field(default_factory=list)
+    artifacts: list = field(default_factory=list)
     files_used: list = field(default_factory=list)
+    open_questions: list = field(default_factory=list)
+
+    @property
+    def artifact_refs(self) -> list:
+        """Back-compat flat view (every chart location + every artifact ref) for any caller not
+        yet updated to read chart_paths/artifacts directly - e.g. worker_service's
+        run_investigation, which only ever needed "what did this investigation produce" as a
+        flat list to pass through as files_created when it enqueues the update_chat_memory job."""
+        return [c["location"] for c in self.chart_paths] + [a["ref"] for a in self.artifacts]

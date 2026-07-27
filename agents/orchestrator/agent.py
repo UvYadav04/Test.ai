@@ -1,5 +1,4 @@
 import inspect
-import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -14,10 +13,8 @@ from agents.orchestrator import capabilities
 from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
-from tools.orchestrator.models import InvestigationState, OrchestratorResult
+from tools.orchestrator.models import FinalResultCollector, InvestigationState, OrchestratorResult
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
-
-_DELIVERABLE_TOOLS = {"generate_csv", "generate_markdown_report", "generate_dashboard"}
 
 _AGENT_NAME = "orchestrator_agent"
 
@@ -111,6 +108,7 @@ class OrchestratorAgent:
     def __init__(
         self, catalog, vector_store=None, reranker=None, memory=None, storage=None,
         reports_dir: str = "data/reports", investigation_id: str = "default", sandbox_manager=None,
+        result_collector: FinalResultCollector = None,
     ):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
@@ -125,9 +123,14 @@ class OrchestratorAgent:
 
 
 
+        # Created here (not defaulted inside OrchestratorTools) whenever the caller doesn't hand
+        # one in, so `self.tools.result_collector` is always a real FinalResultCollector - every
+        # producing tool call below registers into it directly, and run()'s own final
+        # OrchestratorResult is built straight from it, not re-derived from transcript text.
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
             reports_dir=reports_dir, investigation_id=investigation_id, sandbox_manager=sandbox_manager,
+            result_collector=result_collector or FinalResultCollector(),
         )
         self.model_client = client
 
@@ -177,7 +180,6 @@ class OrchestratorAgent:
 
         run_start = time.perf_counter()
         tool_timer = ToolCallTimer(self.logger)
-        transcript = []
         final_text = ""
 
         model_context = UnboundedChatCompletionContext()
@@ -214,9 +216,6 @@ class OrchestratorAgent:
                     if not hasattr(event, "messages"):
                         log_event(self.logger, event)
                         tool_timer.record(event)
-                        line = self._transcript_line(event)
-                        if line:
-                            transcript.append(line)
                         if type(event).__name__ == "TextMessage" and getattr(event, "source", None) == _AGENT_NAME:
                             final_text = event.content
                             ended_in_final_answer = True
@@ -255,16 +254,18 @@ class OrchestratorAgent:
             )
 
         self.logger.info("orchestrator agent run took %.3fs", time.perf_counter() - run_start)
+        # Straight off the collector every producing tool call registered into as it happened -
+        # see FinalResultCollector's docstring. No re-derivation from transcript text needed
+        # anymore, and nothing here is lost if this run ends up in the except-Exception branch
+        # of worker_service's run_investigation instead of returning normally: the SAME
+        # collector instance is still sitting there with whatever was already registered.
+        collector = self.tools.result_collector
         return OrchestratorResult(
             final_answer=final_text,
-            artifact_refs=self._collect_artifact_refs(transcript),
+            chart_paths=collector.chart_paths,
+            artifacts=collector.artifacts,
+            files_used=collector.files_used,
             open_questions=self.tools.state.open_questions,
-            # Dedup while preserving first-seen order - dict.fromkeys is the
-            # idiomatic way to do that without reaching for a separate set +
-            # list. worker_service.tasks.investigation merges this into the
-            # Chat's files_used after the run, for the NEXT investigation in
-            # this chat to see via thread_context.
-            files_used=list(dict.fromkeys(self.tools.state.selected_files)),
         )
 
     def _thread_context_brief(self, thread_context: dict | None) -> str:
@@ -272,10 +273,10 @@ class OrchestratorAgent:
         _context_brief's workspace-wide file catalog. Comes from
         Chat.summary/recent_turns/files_used/files_created
         (shared/models/chat.py), refreshed after every completed
-        investigation in this chat by
-        worker_service.tasks.investigation._update_chat_continuity - this
-        method only ever formats whatever it's handed, it never reads or
-        writes anything itself."""
+        investigation in this chat by the update_chat_memory arq job
+        (worker_service.tasks.investigation) - this method only ever
+        formats whatever it's handed, it never reads or writes anything
+        itself."""
         if not thread_context:
             return "This is the first message in this chat - no earlier context."
 
@@ -355,15 +356,6 @@ class OrchestratorAgent:
 
         return "\n".join(lines)
 
-    @staticmethod
-    def _transcript_line(event) -> str:
-        event_type = type(event).__name__
-        if event_type == "ToolCallRequestEvent":
-            return "\n".join(f"CALL {call.name}({call.arguments})" for call in event.content)
-        if event_type == "ToolCallExecutionEvent":
-            return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
-        return ""
-
     # Human-readable labels for the homescreen "live activity" panel (see
     # project_documentation_and_claude_code_guide.md Section 6) - plain-
     # language status, not raw tool logs, and never the internal name of a
@@ -386,32 +378,6 @@ class OrchestratorAgent:
         "generate_dashboard": "Building a real-time dashboard",
         "get_current_date": "Checking today's date",
         "recall_user_info": "Recalling saved preferences",
-        "store_user_info": "Saving a preference",
     }
 
     _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))
-
-    def _collect_artifact_refs(self, transcript: list) -> list:
-        """Real artifact paths only - never something an LLM transcribed and could get wrong.
-        Two sources: (1) whatever the delegated Tabular/Document agents already reported on
-        their own TabularFindings/DocumentFindings.artifact_refs (e.g. a table_ref surfaced
-        from a PDF), read straight off InvestigationState.completed_tasks; (2) any file path a
-        generate_csv/generate_markdown_report/generate_dashboard call actually returned, parsed
-        out of its RESULT line in the tool-call transcript."""
-        refs = []
-        for event in self.tools.state.completed_tasks:
-            for ref in getattr(event.result, "artifact_refs", None) or []:
-                if ref not in refs:
-                    refs.append(ref)
-
-        pattern = re.compile(r"^RESULT (\w+) -> (.+)$")
-        for line in transcript:
-            for sub_line in line.split("\n"):
-                match = pattern.match(sub_line)
-                if not match or match.group(1) not in _DELIVERABLE_TOOLS:
-                    continue
-                ref = match.group(2).strip()
-                if ref and ref not in refs:
-                    refs.append(ref)
-
-        return refs

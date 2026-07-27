@@ -66,8 +66,7 @@ If you know your next step will require one of these tools, include its capabili
 Request capabilities only when needed. Tool descriptions specify the capability name to request.
 
 Once you have enough evidence, stop calling tools and reply in plain language with your answer,
-citing what you found and mentioning the path of any file you generated. Do not output JSON here
-- a separate step will format your answer.
+citing what you found and mentioning the path of any file you generated.
 """
 
 FORMAT_SYSTEM_MESSAGE = """You are given a user's objective, the accumulated Investigation State
