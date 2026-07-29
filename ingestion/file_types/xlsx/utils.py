@@ -1,37 +1,11 @@
-"""Sheet -> raw grid -> table-island detection.
-
-A workbook can hold multiple sheets, and a single sheet can hold multiple separate tables
-(stacked with a blank row between them, or side-by-side with a blank column between them) -
-common in exported finance/ops reports. detect_tables() finds those islands with two blank-run
-passes (rows, then columns within each row-block) rather than true 2D connected-components -
-simpler, and good enough for the common "clean rectangular blocks separated by blank
-rows/cols" case. Known limitation: two side-by-side tables of very different row heights can
-confuse the row pass (a blank-looking row for the shorter table isn't a real separator if the
-taller table still has data in it) - _table_from_block() drops any resulting blank data rows
-as a cheap mitigation, at the cost of also dropping genuine blank rows inside a real table.
-
-Merged cells are forward-filled onto every cell in their range before island detection - Excel
-(and openpyxl) only keeps a value on the merge's top-left cell and leaves the rest genuinely
-empty, so a merged row-label column ("East" spanning two quarter rows, say) would otherwise
-turn into real data with None in every row but the first. Note this is a deliberate trade-off,
-not a free win: a merged *title* cell that horizontally spans what should be the blank-column
-gap between two side-by-side tables will, once filled, make that gap look non-blank and can
-cause the two tables to be detected as one. There's no heuristic that gets both cases right
-every time; forward-fill was chosen because losing data silently is worse than an occasional
-wrong split.
-"""
 import openpyxl
 import pandas as pd
 
-MIN_TABLE_ROWS = 2  # header + at least one data row
+MIN_TABLE_ROWS = 2
 MIN_TABLE_COLS = 1
 
 
 def load_sheets(file_path: str) -> dict:
-    """Load every sheet as a raw 2D grid of cell values (list of lists), merged cells
-    forward-filled. data_only=True reads formulas' last cached computed value, not the formula
-    string - if the workbook was never opened/recalculated in Excel those cells come back None,
-    same as any other missing value."""
     workbook = openpyxl.load_workbook(file_path, data_only=True)
     try:
         return {name: _sheet_grid(workbook[name]) for name in workbook.sheetnames}
@@ -57,8 +31,6 @@ def _fill_merged_range(grid: list, merged_range) -> None:
 
 
 def detect_tables(grid: list) -> list:
-    """Return every table island in one sheet's grid as {"dataframe", "anchor_row",
-    "anchor_col"} dicts, in top-to-bottom, left-to-right order."""
     tables = []
     for row_start, row_end in _nonblank_ranges(grid):
         row_block = grid[row_start:row_end]
@@ -72,9 +44,6 @@ def detect_tables(grid: list) -> list:
 
 
 def _nonblank_ranges(sequences: list) -> list:
-    """Indices of contiguous non-blank runs in a list of cell sequences - rows for the row
-    pass, transposed columns for the column pass. Same "is every cell in this sequence
-    blank" check either way."""
     ranges = []
     start = None
     for i, seq in enumerate(sequences):

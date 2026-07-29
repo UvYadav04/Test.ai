@@ -1,20 +1,9 @@
-"""Docling-document helpers shared by PDFIngestor. Parsing itself no longer happens here -
-that moved to llamaparse_client.py (LlamaParse's cloud API replaced docling's local CPU
-conversion, see that module's docstring) - this file now only holds the small utilities that
-operate on an already-built DoclingDocument: table extraction/captioning and the
-is_scanned() heuristic used per LlamaParse page."""
-
-
 def is_scanned(document) -> bool:
     text = document.export_to_text()
     return len(text.strip()) < 20
 
 
 def extract_tables(document, chunks: list = None, page_override: int = None) -> list:
-    """`page_override`: when the caller already knows the true page number (llamaparse_client
-    builds one DoclingDocument per LlamaParse page, so docling's own provenance - meaningful
-    only for native PDF conversion - would just say "page 1" every time), pass it here
-    instead of trusting _table_page()'s docling-provenance lookup."""
     tables = []
     for index, table in enumerate(document.tables):
         try:
@@ -41,7 +30,6 @@ def _table_page(table) -> int:
 
 
 def _infer_caption(table, document, chunks: list, page: int) -> str:
-    
     explicit = _explicit_caption(table, document)
     if explicit:
         return explicit

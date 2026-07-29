@@ -1,4 +1,3 @@
-
 import os
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -11,8 +10,6 @@ from vectordb.base import BaseVectorStore
 
 
 def infer_dtypes(df: pd.DataFrame) -> dict:
-    """Shared by every ingestor that produces a dataframe (csv, json, xlsx, future txt) -
-    csv/utils.py and json/utils.py used to each define their own identical copy of this."""
     return {col: str(dtype) for col, dtype in df.dtypes.items()}
 
 
@@ -40,25 +37,6 @@ class BaseIngestor(ABC):
 
 
 class SingleTableIngestor(BaseIngestor):
-    """Base for ingestors whose output is exactly one dataframe (csv, json, and any future
-    flat/text format - tsv, txt-as-table, etc). It implements the validate -> extract_metadata
-    -> ingest wiring (read, write to parquet, wrap in an IngestionResult, catch+report errors
-    as a "failed" result instead of raising) once, so a new single-table format only has to
-    implement `_read_dataframe()` plus whichever hooks it needs below.
-
-    Multi-table formats (pdf, xlsx) don't fit this shape - they extract N tables from one file
-    - and should keep implementing BaseIngestor directly; see PDFIngestor's extracted_tables
-    handling and IngestionManager/file_catalog.table_catalog_entry for that path.
-
-    Hooks a subclass can override:
-      _read_dataframe(file_path, nrows=None) - required. `nrows` is set to a small number
-          during validate()/extract_metadata() so those stay cheap on large files.
-      _postprocess(df) - format-specific cleanup applied only before the final parquet write
-          (e.g. JSON stringifying list/dict columns so parquet can store them).
-      _metadata_extra(file_path) - extra keys merged into extract_metadata()'s return dict
-          beyond columns/dtypes (e.g. CSV's detected delimiter).
-    """
-
     def _read_dataframe(self, file_path: str, nrows: Optional[int] = None) -> pd.DataFrame:
         raise NotImplementedError
 

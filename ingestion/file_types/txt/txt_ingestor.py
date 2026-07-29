@@ -8,12 +8,6 @@ from vectordb.schema import ChunkRecord
 
 
 class TXTIngestor(BaseIngestor):
-    """Plain text: no tables, no OCR - convert through docling (auto-detected as markdown,
-    see txt/utils.py) and chunk with the same DoclingChunker/HybridChunker PDFIngestor uses,
-    rather than a bespoke splitter, so section-aware chunking behaves the same way across both
-    formats. Mirrors PDFIngestor's shape minus everything PDF-structure-specific (pipeline
-    options, table extraction, scanned-page detection - plain text can't be "scanned")."""
-
     def __init__(self, storage=None, vector_store=None, chunker: BaseChunker = None):
         super().__init__(storage=storage, vector_store=vector_store)
         self.chunker = chunker or DoclingChunker()

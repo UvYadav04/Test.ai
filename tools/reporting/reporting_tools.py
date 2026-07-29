@@ -12,19 +12,17 @@ import pandas as pd
 from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
 from tools.reporting.models import ChartSpec
 
-# Warm terracotta-led palette matching the app's own theme - primary accent first, then a mix
-# of warm and a few cool contrast tones so multi-series charts stay readable (not all one hue).
 PALETTE = [
-    "#CC785C",  # terracotta (primary accent)
-    "#4A7C7C",  # muted teal (contrast)
-    "#D9A566",  # warm gold
-    "#8B6F9E",  # muted plum (contrast)
-    "#B0562B",  # deep rust
-    "#6B8F71",  # sage green (contrast)
-    "#C4956C",  # warm tan
-    "#5F7A99",  # dusty blue (contrast)
-    "#A8754A",  # caramel brown
-    "#D97757",  # coral orange
+    "#CC785C",
+    "#4A7C7C",
+    "#D9A566",
+    "#8B6F9E",
+    "#B0562B",
+    "#6B8F71",
+    "#C4956C",
+    "#5F7A99",
+    "#A8754A",
+    "#D97757",
 ]
 
 _HEX_SUFFIX_RE = re.compile(r"_[0-9a-f]{8}$")
@@ -37,10 +35,6 @@ class ReportingTools:
         os.makedirs(output_dir, exist_ok=True)
 
     def generate_csv(self, workspace_id: str, file_id: str, name: Optional[str] = None) -> str:
-        """Convert an existing data artifact (a file_id from a table_ref or from a
-        persisted query_data call) into a CSV file. Creates a new dated folder (today's date + name) and
-        writes the CSV there, alongside a copy of the source data file, so the request's
-        output is self-contained. Returns the CSV file path."""
         folder = self._new_folder(name, "export")
         dataframe = self._read_dataframe(workspace_id, file_id)
         path = os.path.join(folder, "data.csv")
@@ -57,11 +51,6 @@ class ReportingTools:
         open_questions: Optional[list] = None,
         name: Optional[str] = None,
     ) -> str:
-        """Build a markdown report file from your synthesized investigation results. Call this
-        when the user wants a written report file, not just a chat answer - pass your own
-        summary and findings text (as a list of short strings), not raw tool output. Creates a
-        new dated folder (today's date + name, falling back to a slug of title) and writes the
-        report there."""
         lines = [f"# {title}", "", f"**Objective:** {objective}", "", "## Summary", "", summary]
 
         if findings:
@@ -81,15 +70,6 @@ class ReportingTools:
         return path
 
     def render_single_chart(self, workspace_id: str, spec: ChartSpec, name: Optional[str] = None) -> str:
-        """Render ONE chart to its own standalone HTML file, in its own fresh folder (never
-        shared with another chart's folder). Used by TabularTools.create_visualizations to
-        generate/save each chart in a batch independently - worker_service's _persist_artifacts
-        deletes a chart's whole containing folder once it's uploaded (shutil.rmtree on
-        os.path.dirname(ref)), so two charts sharing one folder would have one wipe out the
-        other's still-unprocessed file. Giving every chart its own folder sidesteps that with no
-        change needed to the persistence code.
-
-        Returns the HTML file's local path; also copies the source parquet alongside it."""
         folder = self._new_folder(name or spec.title, "chart")
         dataframe = self._read_dataframe(workspace_id, spec.file_id)
         self._copy_source(workspace_id, spec.file_id, folder)
@@ -109,20 +89,6 @@ class ReportingTools:
         file_ids: list,
         name: Optional[str] = None,
     ) -> str:
-        """Build a real-time dashboard bundle: one small standalone HTML file per chart -
-        deliberately NOT one combined page, since each chart needs to be independently
-        refreshable/addressable as its own Chart doc (see shared/models/dashboard.py's
-        ChartConfig) - plus a manifest.json describing
-        everything needed to refresh the whole thing later with no LLM involvement:
-        transform_script (re-run wholesale against file_ids' CURRENT data on every refresh -
-        see sandbox/runner.py, its `saved` list survives a mid-script exception) and one config
-        per chart (its ChartSpec fields plus the stable `name` its data gets save()'d under
-        inside transform_script).
-
-        Returns the manifest.json path, not an HTML path - worker_service/tasks/
-        investigation.py's _persist_artifacts() recognizes that specific filename and turns
-        it into one Dashboard doc + one Chart doc per chart, uploading each chart_N.html to
-        R2 and setting that Chart's storage_key from it."""
         folder = self._new_folder(name or title, "dashboard")
         charts_meta = []
 
@@ -165,8 +131,6 @@ class ReportingTools:
 
     @classmethod
     def _render_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
-        """Shared by render_single_chart and generate_realtime_dashboard_bundle (both one page
-        per chart) - dispatches to the right _*_section builder for spec.chart_type."""
         if spec.chart_type in ("bar", "line"):
             return cls._categorical_section(dataframe, spec)
         if spec.chart_type == "timeline":
@@ -189,7 +153,6 @@ class ReportingTools:
         if isinstance(raw, ChartSpec):
             return raw
         if isinstance(raw, str):
-            # backward-compatible shorthand: a bare file_id string means an auto bar chart
             return ChartSpec(file_id=raw)
         return ChartSpec(**raw)
 
@@ -201,8 +164,6 @@ class ReportingTools:
         return folder
 
     def _artifact_path(self, workspace_id: str, file_id: str) -> str:
-        """The only place ReportingTools turns a file_id into an actual filesystem path -
-        never accepts or forwards a path from a caller."""
         return get_parquet_path(self.storage.root_dir, workspace_id, file_id)
 
     def _read_dataframe(self, workspace_id: str, file_id: str) -> pd.DataFrame:
@@ -230,9 +191,6 @@ class ReportingTools:
 
     @classmethod
     def _pivot_datasets(cls, df: pd.DataFrame, index_col: str, series_col: str, value_col: str) -> tuple:
-        """Shared long/tidy -> chart-ready pivot: one row per (index_col, series_col, value_col)
-        becomes one label per distinct index_col value and one dataset per distinct series_col
-        value. Used for grouped bar/line charts and for timeline charts with multiple series."""
         pivot = df.pivot_table(index=index_col, columns=series_col, values=value_col, aggfunc="sum")
         labels = [str(v) for v in pivot.index.tolist()]
         datasets = [
@@ -361,8 +319,6 @@ class ReportingTools:
             "y": [cls._safe(v) for v in df[spec.y_column].tolist()],
             "z": [cls._safe(v) for v in df[spec.z_column].tolist()],
         }
-
-    # ------------------------------------------------------------------ rendering
 
     @staticmethod
     def _chip(chart_type: str) -> str:
@@ -562,8 +518,6 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
                 "zaxis": {"title": section.get("z_label") or "Z", "gridcolor": "#EDEAE0"},
             },
         }
-        # Warm terracotta-to-cream colorscale so 3D charts match the app's theme instead of
-        # Plotly's default cool Viridis (blue-green-yellow).
         warm_colorscale = [
             [0.0, "#F5F4EE"], [0.25, "#E8C4A8"], [0.5, "#D9A566"],
             [0.75, "#CC785C"], [1.0, "#8B4A32"],

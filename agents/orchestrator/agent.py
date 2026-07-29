@@ -18,18 +18,10 @@ from tools.orchestrator.orchestrator_tools import OrchestratorTools
 
 _AGENT_NAME = "orchestrator_agent"
 
-# Upper bound on outer (= one LLM call each, see run()'s loop) iterations - same budget the
-# single AssistantAgent used to get via max_tool_iterations=25 before this file switched to
-# reconstructing a fresh AssistantAgent per iteration (see run()'s docstring for why).
 _MAX_OUTER_ITERATIONS = 25
 
 
 class _CapabilityHolder:
-    """Tiny mutable box holding the most recent `next_capabilities` value any wrapped tool call
-    received this run - see `_wrap_with_next_capabilities` below. One instance per
-    OrchestratorAgent.run() call, reset before each outer-loop iteration so a turn that makes no
-    tool call (a plain-text final answer) can never see a stale value from an earlier turn."""
-
     __slots__ = ("value",)
 
     def __init__(self):
@@ -37,26 +29,6 @@ class _CapabilityHolder:
 
 
 def _wrap_with_next_capabilities(func, holder: "_CapabilityHolder"):
-    """Generically adds one extra parameter, `next_capabilities: list[str] = []`, to ANY
-    orchestrator tool callable's exposed schema - this is applied uniformly to every tool (core
-    and capability-gated alike), never special-cased per tool name, so registering a brand new
-    capability never requires touching this function.
-
-    Why the extra param lives on every tool's own call instead of being a separate
-    `set_next_capabilities` tool: every LLM provider here is configured with
-    parallel_tool_calls=False (see llm_provider/providers/*.py, and agents/timing.py's note on
-    why), so the model can only make ONE tool call per turn - it has no way to call e.g.
-    invoke_tabular_agent AND a hypothetical separate capability-request tool in the same turn.
-    Piggybacking `next_capabilities` onto whatever tool the model was already going to call is
-    the only way to get both "the real action" and "what's needed next" out of a single model
-    round trip, which is what keeps this mechanism from adding any extra LLM calls or prompt
-    round-trips beyond what the orchestrator already made.
-
-    The real tool (`func`) is never modified and is called with its original arguments only -
-    `next_capabilities` is popped off before the call. `holder.value` is overwritten on every
-    call (default `[]` if the model didn't supply one), and is read by run()'s outer loop right
-    after the call returns to decide which capabilities to expose on the next iteration.
-    """
     orig_sig = inspect.signature(func)
     next_capabilities_param = inspect.Parameter(
         "next_capabilities",
@@ -93,12 +65,6 @@ def _wrap_with_next_capabilities(func, holder: "_CapabilityHolder"):
 
 
 class InvestigationCancelled(Exception):
-    """Raised by OrchestratorAgent.run() when cancel_check() returns True
-    between steps. Callers (worker_service) catch this specifically to mark
-    the Investigation as cancelled rather than completed/failed - the
-    partial InvestigationState up to that point is still attached via
-    `.state` for logging/debugging."""
-
     def __init__(self, state: InvestigationState):
         super().__init__("investigation cancelled")
         self.state = state
@@ -112,21 +78,9 @@ class OrchestratorAgent:
     ):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
-        # FALLBACK_LLM_PROVIDER (defaults to "groq" for backward compat) - if it ends up equal
-        # to model_config["provider"] (e.g. ORCHESTRATOR_PROVIDER=groq with the default fallback
-        # left as-is), LLMProvider.get_client() detects that and skips the no-op fallback wrap
-        # entirely, so a primary-provider outage/rate-limit isn't silently "protected" by nothing.
-        # Set FALLBACK_LLM_PROVIDER to a provider genuinely different from ORCHESTRATOR_PROVIDER
-        # for the fallback to do anything.
         fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
         client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
 
-
-
-        # Created here (not defaulted inside OrchestratorTools) whenever the caller doesn't hand
-        # one in, so `self.tools.result_collector` is always a real FinalResultCollector - every
-        # producing tool call below registers into it directly, and run()'s own final
-        # OrchestratorResult is built straight from it, not re-derived from transcript text.
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
             reports_dir=reports_dir, investigation_id=investigation_id, sandbox_manager=sandbox_manager,
@@ -134,11 +88,6 @@ class OrchestratorAgent:
         )
         self.model_client = client
 
-        # Every tool the orchestrator could ever call, each wrapped once (not re-wrapped per
-        # run/iteration - wrapping only touches the callable's exposed schema/doc, it doesn't
-        # capture any per-run state itself) with the generic `next_capabilities` parameter. A
-        # single shared _CapabilityHolder is threaded through per run() call (see there) so
-        # whichever tool the model actually calls each turn writes into the same place.
         self._capability_holder = _CapabilityHolder()
         self._wrapped_tools = {
             name: _wrap_with_next_capabilities(getattr(self.tools, name), self._capability_holder)
@@ -154,8 +103,6 @@ class OrchestratorAgent:
         on_event=None,
         cancel_check=None,
     ) -> OrchestratorResult:
-
-
         constraints = constraints or {}
         self.tools.workspace_id = workspace_id
         self.tools.state = InvestigationState(
@@ -163,10 +110,6 @@ class OrchestratorAgent:
             objective=objective,
             constraints=constraints,
         )
-        # Handed to invoke_tabular_agent/invoke_document_agent so the
-        # delegated sub-agent's own tool calls (run_python, search_documents,
-        # ...) stream as events too, not just the orchestrator's - see
-        # TabularAgent.run/DocumentAgent.run's own `on_event` param.
         self.tools.on_event = on_event
 
         task = (
@@ -197,9 +140,6 @@ class OrchestratorAgent:
                 reflect_on_tool_use=False,
                 max_tool_iterations=1,
             )
-            # Reset before every iteration (not just the first) so a turn that ends without any
-            # tool call - i.e. the model's final plain-text answer - can never pick up a stale
-            # value left over from an earlier turn.
             self._capability_holder.value = []
             ended_in_final_answer = False
 
@@ -208,8 +148,6 @@ class OrchestratorAgent:
                 outer_iteration, len(tool_names), ", ".join(tool_names),
             )
             stream = iteration_agent.run_stream(task=next_task)
-            # Only the very first outer iteration sends the objective as a new user message -
-            # every iteration after that continues the same model_context (see docstring above).
             next_task = None
             try:
                 async for event in stream:
@@ -238,14 +176,8 @@ class OrchestratorAgent:
                         pass
 
             if ended_in_final_answer:
-                # No tool call this turn - matches autogen's own stopping rule ("if the model
-                # returns no tool call... this ends the tool call iteration loop regardless of
-                # the max_tool_iterations setting"), just enforced by this outer loop instead.
                 break
 
-            # The model's next_capabilities (from whichever tool it called this turn, captured
-            # by _wrap_with_next_capabilities) decide what's exposed on the NEXT iteration only -
-            # not accumulated - so the prompt stays as small as the model says it needs it to be.
             active_capabilities = list(self._capability_holder.value)
         else:
             self.logger.warning(
@@ -254,11 +186,6 @@ class OrchestratorAgent:
             )
 
         self.logger.info("orchestrator agent run took %.3fs", time.perf_counter() - run_start)
-        # Straight off the collector every producing tool call registered into as it happened -
-        # see FinalResultCollector's docstring. No re-derivation from transcript text needed
-        # anymore, and nothing here is lost if this run ends up in the except-Exception branch
-        # of worker_service's run_investigation instead of returning normally: the SAME
-        # collector instance is still sitting there with whatever was already registered.
         collector = self.tools.result_collector
         return OrchestratorResult(
             final_answer=final_text,
@@ -269,14 +196,6 @@ class OrchestratorAgent:
         )
 
     def _thread_context_brief(self, thread_context: dict | None) -> str:
-        """Continuity from earlier turns in THIS chat - distinct from
-        _context_brief's workspace-wide file catalog. Comes from
-        Chat.summary/recent_turns/files_used/files_created
-        (shared/models/chat.py), refreshed after every completed
-        investigation in this chat by the update_chat_memory arq job
-        (worker_service.tasks.investigation) - this method only ever
-        formats whatever it's handed, it never reads or writes anything
-        itself."""
         if not thread_context:
             return "This is the first message in this chat - no earlier context."
 
@@ -306,11 +225,6 @@ class OrchestratorAgent:
         return "\n".join(lines) if lines else "This is the first message in this chat - no earlier context."
 
     def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
-        """Precompute what get_current_date/recall_user_info/list_files would return and hand
-        it to the agent directly in the task message, instead of making it spend its first 2-4
-        tool calls (each a full model round trip) re-fetching things we already know here for
-        free. The agent still has all these tools available for anything beyond this - a fuzzy
-        name match, a workspace with more files than shown, or re-checking something mid-run."""
         now = datetime.now(timezone.utc)
         lines = [f"Today's date: {now.date().isoformat()} ({now.strftime('%A')}, UTC)."]
 
@@ -321,13 +235,6 @@ class OrchestratorAgent:
         else:
             lines.append("No standing user preferences/facts saved yet.")
 
-        # .browsable(), not .all(): same visibility rules as list_files/search_files (see
-        # FileCatalog.is_browsable) - an xlsx workbook's own file_id never appears here (it has
-        # no queryable data of its own, only its sheets do - see list_tables), and a PDF's
-        # per-page tables are never pre-enumerated here (a dense PDF can have dozens; this brief
-        # is rebuilt fresh into every single task message, so listing them all would blow up
-        # context turn after turn - they're meant to surface lazily via a Document Agent's own
-        # table_ref instead).
         entries = self.tools.catalog.browsable()
         if not entries:
             lines.append("Workspace files: none uploaded yet.")
@@ -356,13 +263,6 @@ class OrchestratorAgent:
 
         return "\n".join(lines)
 
-    # Human-readable labels for the homescreen "live activity" panel (see
-    # project_documentation_and_claude_code_guide.md Section 6) - plain-
-    # language status, not raw tool logs, and never the internal name of a
-    # delegated agent (invoke_tabular_agent/invoke_document_agent both just
-    # read as "Assigning an agent" - the user sees what's happening, not
-    # which specialist is doing it). See agents/events.py for why there's no
-    # matching "done" event for any of these.
     _FRIENDLY_TOOL_NAMES = {
         "list_files": "Listing files",
         "search_files": "Searching files",

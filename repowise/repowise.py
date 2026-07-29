@@ -15,7 +15,6 @@ class Repowise:
         self.config = self.configManager.get_current()
 
     async def index_repo(self):
-        #deleting previous repowise folder so that it doesnot get included in indexing
         self._delete_repowise_folder()
         retries = self.configManager.get_retries()
         for attempt in range(retries):
@@ -84,7 +83,6 @@ class Repowise:
         return args
 
     async def __initiate_mcp_server(self):
-        # start repowise mcp if not already running
         if self.mcp_process and self.mcp_process.returncode is None:
             return
 
@@ -96,20 +94,17 @@ class Repowise:
         )
         self.msg_id = 0
 
-        # mcp initialize handshake
         await self.__send_msg("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "repowise-client", "version": "1.0"}
         })
 
-        # send initialized notification (no id, not a request)
         note = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
         self.mcp_process.stdin.write(note.encode())
         await self.mcp_process.stdin.drain()
 
     async def __send_msg(self, method, params=None):
-        # send json-rpc message and return matching response
         self.msg_id += 1
         msg = {"jsonrpc": "2.0", "id": self.msg_id, "method": method}
         if params is not None:
@@ -118,7 +113,6 @@ class Repowise:
         self.mcp_process.stdin.write((json.dumps(msg) + "\n").encode())
         await self.mcp_process.stdin.drain()
 
-        # skip notifications, wait for response with our id
         while True:
             line = await self.mcp_process.stdout.readline()
             if not line:
@@ -133,7 +127,6 @@ class Repowise:
             await self.mcp_process.wait()
 
     async def get_mcp_tools(self):
-        # list all available mcp tools
         await self.__initiate_mcp_server()
         result = await self.__send_msg("tools/list")
         if result and "result" in result:
@@ -141,20 +134,14 @@ class Repowise:
         return []
 
     async def call_mcp_tool(self, tool_name: str, args: dict = {}):
-        # call a specific mcp tool
         await self.__initiate_mcp_server()
         result = await self.__send_msg("tools/call", {"name": tool_name, "arguments": args})
-        # if result and "result" in result:
-        #     return result["result"]
-        # return None
         return result
 
     async def update_repo(self):
-        # re-index the repo
         await self.index_repo()
 
     def delete_repo(self):
-        # remove .repowise data folder
         data_dir = os.path.join(self.repo_path, ".repowise")
         if os.path.exists(data_dir):
             shutil.rmtree(data_dir)
@@ -163,7 +150,6 @@ class Repowise:
             print("No repowise data found")
 
     async def get_repo_info(self):
-        # run repowise status and return output
         process = await asyncio.create_subprocess_exec(
             "repowise", "status", self.repo_path,
             stdout=asyncio.subprocess.PIPE,
@@ -173,7 +159,6 @@ class Repowise:
         return stdout.decode().strip()
 
     async def stop_mcp(self):
-        # kill the running mcp server
         if self.mcp_process and self.mcp_process.returncode is None:
             self.mcp_process.terminate()
             await self.mcp_process.wait()

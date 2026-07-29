@@ -15,11 +15,6 @@ logger = logging.getLogger("llm_provider.fallback")
 
 
 class FallbackChatCompletionClient(ChatCompletionClient):
-    """Wraps a primary and a fallback ChatCompletionClient. Every call tries the primary
-    client first; if it raises, the same call is retried against the fallback client instead
-    of failing the whole agent run. Usage/token accounting and model_info/capabilities are
-    reported from whichever client most recently handled a call."""
-
     def __init__(self, primary: ChatCompletionClient, fallback: ChatCompletionClient):
         self._primary = primary
         self._fallback = fallback

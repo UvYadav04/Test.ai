@@ -19,7 +19,6 @@ class DocumentAgent:
     def __init__(self, assigned_files: list, vector_store=None, reranker=None, direct_route: bool = False):
         self.logger = get_agent_logger("document_agent")
         model_config = get_model_config()
-        # See orchestrator/agent.py's comment on FALLBACK_LLM_PROVIDER - same reasoning here.
         fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
         provider = LLMProvider(model_config["provider"], fallback_provider=fallback_provider)
         client = provider.get_client(model_config["model"])
@@ -48,9 +47,6 @@ class DocumentAgent:
                 self.tools.search_tables,
                 self.tools.get_table,
             ],
-            # direct_route=True when the controller routed straight here (bypassing the
-            # Orchestrator) - see worker_service/tasks/investigation.py's _run_document_direct
-            # and agents/document/config.py's DIRECT_ROUTE_ADDENDUM for what that changes.
             system_message=get_system_message(direct_route),
             reflect_on_tool_use=False,
             max_tool_iterations=10,
@@ -119,8 +115,6 @@ class DocumentAgent:
             return "\n".join(f"RESULT {res.name} -> {res.content}" for res in event.content)
         return ""
 
-    # Same style/rules as OrchestratorAgent's own map (agents/events.py) -
-    # genuine plain-language labels, no "done" counterpart.
     _FRIENDLY_TOOL_NAMES = {
         "get_file_overview": "Reviewing file details",
         "expand_query": "Refining the search",

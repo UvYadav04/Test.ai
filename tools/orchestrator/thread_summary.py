@@ -1,34 +1,3 @@
-"""Maintains Chat.summary and long-term user preferences - both regenerated from one small LLM
-call per completed investigation (see worker_service.tasks.investigation.update_chat_memory, an
-arq job enqueued AFTER the investigation's own "completed" event/Message are already persisted
-and broadcast, so this call's latency is never on the user-facing critical path).
-
-Two jobs share this one call rather than two separate ones:
-
-1. Rolling chat summary - only needed once a chat has more turns than fit in the raw
-   recent_turns window shown verbatim to the orchestrator (see
-   OrchestratorAgent._thread_context_brief and RECENT_TURNS_LIMIT in investigation.py).
-   Summarizing every turn regardless of chat length (the old behavior) meant the orchestrator's
-   prompt carried the same turn twice - once in the summary, once verbatim in recent_turns - for
-   the first RECENT_TURNS_LIMIT turns of every single chat. Callers only pass turns_to_fold once
-   a turn is actually about to age out of that window; otherwise the previous summary is
-   returned unchanged with no LLM involvement at all for that half of the call... except this is
-   one combined call (see below), so the model is simply told there's nothing to fold this time.
-
-2. Durable user preferences/facts (e.g. "prefers bar charts over pie charts") - extracted from
-   EVERY completed turn, independent of chat length. This replaces the orchestrator's old
-   store_user_info tool call: previously the orchestrator had to notice something worth
-   remembering mid-run and spend a whole extra synchronous LLM round trip (tool call -> tool
-   result -> continue) calling it. Now the same extraction happens for free as a side effect of
-   this already-scheduled, already-async summary call - zero added latency during the
-   investigation itself.
-
-Deliberately its own tiny LLM call rather than something folded into the orchestrator's own run:
-it only ever sees {previous_summary, turns to fold, latest user message, latest final answer} -
-no tool schemas, no file catalog - so it stays small and fast regardless of how large the
-orchestrator's own prompt grows, and a failure here (see call site) never has to fail the
-investigation itself.
-"""
 from agents.orchestrator.config import get_model_config
 from llm_provider import LLMProvider, get_settings
 from tools.llm_call import ask_llm_async
@@ -82,10 +51,6 @@ def _format_fold_turns(turns: list[dict]) -> str:
 
 
 def _parse_response(raw: str, fallback_summary: str) -> tuple[str, list[str]]:
-    """Defensive parsing - if the model doesn't follow the exact format, fall back to treating
-    the whole reply as the summary and reporting no new preferences, rather than raising and
-    losing the turn's continuity entirely (see call site's own try/except for the outer
-    failure/retry story)."""
     if _PREFERENCES_MARKER not in raw:
         return raw.replace(_SUMMARY_MARKER, "", 1).strip() or fallback_summary, []
 
@@ -103,18 +68,10 @@ def _parse_response(raw: str, fallback_summary: str) -> tuple[str, list[str]]:
 async def analyze_turn(
     previous_summary: str, query: str, response: str, turns_to_fold: list[dict] | None = None,
 ) -> tuple[str, list[str]]:
-    """Returns (new_summary, new_preference_lines). new_summary equals previous_summary
-    (functionally - modulo the model faithfully echoing it back, see _NO_FOLD_SECTION) whenever
-    turns_to_fold is empty; new_preference_lines is extracted from (query, response) every call,
-    regardless of turns_to_fold."""
     model_config = get_model_config()
-    # See orchestrator/agent.py's comment on FALLBACK_LLM_PROVIDER - same reasoning here.
     fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
     client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
 
-    # Real (possibly empty) value, kept separate from the placeholder text used in the prompt -
-    # this is what _parse_response falls back to if the model doesn't follow the format, so a
-    # parse failure on a no-fold call can never fabricate "(none yet...)" as a real summary.
     fallback_summary = previous_summary or ""
     previous_summary_display = previous_summary or "(none yet - this is the first turn in this chat)"
 

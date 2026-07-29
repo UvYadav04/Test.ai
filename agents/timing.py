@@ -17,8 +17,6 @@ class ToolCallTimer:
             for res in event.content:
                 start = self._pending.pop(res.name, None)
                 if start is None:
-                    # No matching request seen (e.g. timer created mid-stream) - nothing to
-                    # diff against, skip rather than log a bogus duration.
                     continue
                 status = "error" if getattr(res, "is_error", False) else "ok"
                 self._logger.info("tool call %s took %.3fs (%s)", res.name, now - start, status)

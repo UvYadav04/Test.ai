@@ -28,9 +28,6 @@ class HypothesisTools:
             self.llm_provider = llm_provider
             self.model = model
         else:
-            # HYPOTHESIS_PROVIDER/HYPOTHESIS_MODEL - same per-agent override pattern as
-            # agents/tabular/config.py and agents/orchestrator/config.py. Falls back to
-            # DEFAULT_LLM_PROVIDER (LLMProvider's own default) if unset.
             model_config = get_model_config()
             self.llm_provider = LLMProvider(model_config["provider"])
             self.model = model or model_config["model"]
@@ -55,19 +52,7 @@ class HypothesisTools:
 
     @staticmethod
     def _describe_file(f) -> str:
-        """`context["available_files"]` is a tool-call argument the orchestrator LLM builds
-        itself, so items here are ALWAYS plain JSON dicts by the time they arrive - never the
-        actual FileCatalogEntry objects a prior list_files call returned (those only look like
-        that from the model's side; tool-call arguments round-trip through JSON, which drops
-        the class entirely). Attribute access (f.filename) unconditionally crashed here with
-        "'dict' object has no attribute 'filename'" on literally every non-empty call. The model
-        also isn't guaranteed to reuse list_files' exact field names when it retypes this dict
-        (seen in practice: {"file_id": ..., "name": ...} instead of "filename", with "file_type"
-        dropped entirely) - so fall back across the field names it's plausible for the model to
-        have used, and degrade gracefully (rather than KeyError) if a field is missing outright."""
         if not isinstance(f, dict):
-            # Defensive only - shouldn't happen given the JSON round-trip above, but a real
-            # FileCatalogEntry (or similar) is handled the same way old code assumed.
             name = getattr(f, "filename", None) or getattr(f, "name", None) or str(f)
             file_type = getattr(f, "file_type", None) or "unknown type"
             return f"- {name} ({file_type})"

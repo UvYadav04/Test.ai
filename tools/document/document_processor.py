@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import logging
@@ -13,38 +12,18 @@ from tools.orchestrator.models import DocumentFindings
 
 logger = logging.getLogger("tools.document.processor")
 
-# --- Tunables (configurable via settings, see DocumentProcessor.__init__) --------------------
-
-# Batch by total estimated token count, not chunk count - see module docstring's algorithm and
-# the batching example in the design doc this implements (MAX_BATCH_TOKENS = 6000 there).
 DEFAULT_MAX_BATCH_TOKENS = 6000
 
-# Cap on concurrent in-flight batch LLM calls - "parallel where possible" doesn't mean
-# unbounded; this keeps a very long document from firing 50+ simultaneous requests at the
-# provider.
 DEFAULT_MAX_PARALLEL_BATCHES = 6
 
 
 def get_model_config() -> dict:
-    """Same per-agent-config pattern as agents/*/config.py - independently tunable from
-    DOCUMENT_AGENT_PROVIDER/MODEL since this pipeline makes many small parallel extraction
-    calls (cheap/fast matters more here) plus one larger synthesis call, a different cost
-    profile than the Document Agent's own reasoning loop. Falls back to LLMProvider's own
-    DEFAULT_LLM_PROVIDER when unset."""
     settings = get_settings()
     return {
         "provider": settings.get("DOCUMENT_PROCESSOR_PROVIDER", "") or None,
         "model": settings.get("DOCUMENT_PROCESSOR_MODEL", "") or None,
     }
 
-
-# --- Prompts -------------------------------------------------------------------------------
-# Deliberately intent-agnostic: the SAME two-key JSON shape (summary + findings) is asked for
-# no matter what the objective actually says. "summary" and "findings" are generic enough to
-# hold a summarization's key points, an anomaly list, extracted risks, action items, FAQ
-# entries, whatever - the objective's own wording is what shapes their CONTENT, the KEYS never
-# change. That's what lets merge_batch_outputs stay a fixed, deterministic function regardless
-# of which free-form objective was given.
 
 _BATCH_SYSTEM_PROMPT = """You are an information extractor, not a chat assistant. You process \
 ONE portion of a larger document at a time and return ONLY structured JSON - no commentary, no \
@@ -97,9 +76,6 @@ _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _extract_json(raw_text: str) -> dict | None:
-    """Same tolerant extraction idiom used elsewhere in this codebase for LLM JSON replies
-    (see shared/intent_classifier.py) - pull the first {...} block out rather than assuming
-    the whole reply is clean JSON, since instruct models occasionally wrap it anyway."""
     match = _JSON_BLOCK_RE.search(raw_text or "")
     if not match:
         return None
@@ -110,12 +86,7 @@ def _extract_json(raw_text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-# --- Retrieval + batching (pure, no LLM) ----------------------------------------------------
-
 def _ordered_chunks(vector_store, file_ids: list) -> list:
-    """Every chunk belonging to the given files, in original document order - grouped by file
-    (in the given file order), sorted within each file by chunk_index. No semantic search, no
-    query, no ranking: this is a full, deterministic read of the assigned document(s)."""
     ordered = []
     for file_id in file_ids:
         chunks = vector_store.get_by_filter({"file_id": file_id})
@@ -125,8 +96,6 @@ def _ordered_chunks(vector_store, file_ids: list) -> list:
 
 
 def batch_chunks(chunks: list, max_batch_tokens: int) -> list:
-    """Token-aware batching - see module docstring's algorithm. A single chunk larger than
-    max_batch_tokens on its own still gets its own batch rather than being dropped or split."""
     batches: list = []
     current: list = []
     current_tokens = 0
@@ -143,11 +112,6 @@ def batch_chunks(chunks: list, max_batch_tokens: int) -> list:
 
 
 def merge_batch_outputs(batch_outputs: list) -> dict:
-    """Combine every batch's JSON into one merged object - no LLM involved, and no knowledge of
-    what the objective actually asked for (the keys are always exactly "summary"/"findings", see
-    _BATCH_SYSTEM_PROMPT). Non-relevant/empty batches contribute nothing. "findings" items are
-    deduped (dict/list items on their JSON form since they aren't hashable, everything else on
-    its normalized string form) - "summary" strings are simply joined."""
     summaries = []
     findings: list = []
     seen = set()
@@ -168,14 +132,8 @@ def merge_batch_outputs(batch_outputs: list) -> dict:
 
 
 class DocumentProcessor:
-    """One-shot pipeline instance - construct fresh per invoke_document_processor call, same
-    lifecycle as TabularAgent/DocumentAgent (see tools/orchestrator/orchestrator_tools.py)."""
-
     def __init__(self, assigned_files: list, vector_store, llm_provider=None, max_batch_tokens: int = None):
         self.assigned_file_ids = [f.file_id for f in assigned_files]
-        # FileRef (tools/orchestrator/models.py) only carries file_id - no filename - so this
-        # falls back to the id itself; it's only used as informational text in batch prompts,
-        # never for lookup.
         self.filenames = {fid: fid for fid in self.assigned_file_ids}
         self.vector_store = vector_store
         if llm_provider is not None:
@@ -199,10 +157,6 @@ class DocumentProcessor:
         self.logger = logger
 
     async def run(self, objective: str, constraints: dict = None, on_event=None) -> DocumentFindings:
-        """`objective` is a free-form analysis instruction the orchestrator wrote from the
-        user's request (e.g. "Identify inconsistencies in this financial report.") - used
-        VERBATIM as the reasoning instruction for every batch and the final synthesis call. See
-        module docstring for why this is deliberately not a fixed intent enum."""
         run_start = time.perf_counter()
 
         if on_event is not None:
@@ -293,8 +247,6 @@ class DocumentProcessor:
             return result.strip()
         except Exception:
             self.logger.exception("document_processor: final synthesis call failed")
-            # Best-effort fallback so a synthesis-call failure doesn't lose everything the
-            # batches already extracted.
             return (
                 "Could not synthesize a final answer due to an internal error. Raw extracted "
                 f"findings:\n{json.dumps(merged, indent=2)}"

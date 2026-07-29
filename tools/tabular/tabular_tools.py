@@ -27,45 +27,18 @@ class TabularTools:
         self.workspace_id = workspace_id
         self.investigation_id = investigation_id
         self.root_dir = getattr(storage, "root_dir", None)
-        # Same ReportingTools every other chart/report/dashboard renderer uses (see
-        # tools/orchestrator/orchestrator_tools.py) - create_visualizations below delegates the
-        # actual chart rendering/file-writing to it (render_single_chart) rather than
-        # reimplementing that here, so there's exactly one place that knows how to turn a
-        # ChartSpec + dataframe into an HTML file.
         self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
         self.table_names = {}
         for file_ref in assigned_files:
-            # register_view resolves (workspace_id, file_id) -> parquet path itself via
-            # get_parquet_path - no output_ref/path is read off file_ref anymore.
             self.table_names[file_ref.file_id] = register_view(
                 self.con, file_ref.file_id, self.workspace_id, self.root_dir
             )
 
-        # investigation_id (not workspace_id) is the persistent sandbox's cache key - see
-        # sandbox_manager.py's docstring for why: this TabularTools instance is one of possibly
-        # several created over the course of a single investigation (one per invoke_tabular_agent
-        # call), and all of them should land on the SAME warm sandbox container. `sandbox_manager`
-        # (threaded all the way down from ctx["sandbox_manager"] in worker.py's on_startup) is
-        # passed through explicitly rather than left for PythonSandbox to re-resolve via
-        # get_manager() - see OrchestratorAgent.__init__'s note on why that matters.
         self._sandbox = (
             PythonSandbox(self.root_dir, investigation_id=self.investigation_id, manager=sandbox_manager)
             if self.root_dir else None
         )
-        # Every artifact this instance's run_python() calls have actually save()'d, keyed by
-        # file_id - captured straight from the sandbox's own structured response (see run_python
-        # below), never re-derived from anything the LLM wrote. TabularAgent.run() reads this
-        # off the object after its loop completes (same pattern as last_transform_script/
-        # last_transform_file_ids) to attach real columns/dtypes/row_count to what it reports
-        # back to the orchestrator, instead of the orchestrator only ever seeing a bare file_id.
         self.saved_artifacts: dict = {}
-        # Metadata for every chart this instance's create_visualizations() calls have actually
-        # rendered and saved to disk (see that method) - each entry already a REAL, existing HTML
-        # file, not a plan. Read off this object by TabularAgent.run() the same way as
-        # saved_artifacts above: its "location" values get merged into TabularFindings.
-        # artifact_refs (so worker_service's existing _persist_artifacts uploads them and creates
-        # Chart docs with no further code needed), and the entries themselves are attached as
-        # TabularFindings.charts for the orchestrator to mention in its final answer.
         self.charts_created: list = []
 
     def _check_assigned(self, file_id: str) -> None:
@@ -77,9 +50,6 @@ class TabularTools:
 
     @staticmethod
     def _quote_ident(name: str) -> str:
-        """Quote a column/alias name for safe use inside SQL we build ourselves - real-world
-        CSV headers routinely contain spaces ("Job Title", "User Id") which are not valid
-        unquoted SQL identifiers."""
         return '"' + str(name).replace('"', '""') + '"'
 
     def list_allowed_files(self) -> list:
@@ -102,8 +72,8 @@ class TabularTools:
         return files
 
     def run_python(self, code: str, file_ids: list) -> dict:
-        """ 
-        Execute Python code in an isolated sandbox. Pass file ids to be used. 
+        """
+        Execute Python code in an isolated sandbox. Pass file ids to be used.
 
         Use table name for accessing the dataframe.
 
@@ -154,22 +124,12 @@ class TabularTools:
         except SandboxExecutionError as exc:
             return {"stdout": "", "saved": [], "error": str(exc)}
 
-        # Recorded straight from the sandbox's own structured response - not the LLM's
-        # transcription of it - so TabularAgent.run() can later report real columns/dtypes/
-        # row_count/column_kinds for each save()'d artifact, not just its bare file_id. Keyed by
-        # file_id and never cleared between calls, so it also survives across multiple
-        # run_python calls within the same TabularTools instance (a multi-step analysis that
-        # saves more than once in one invoke_tabular_agent call).
         for entry in result.get("saved") or []:
             file_id = entry.get("file_id")
             if file_id:
                 self.saved_artifacts[file_id] = entry
         return result
 
-    # Kept as a plain set (rather than derived from ChartSpec's Literal via typing.get_args) so
-    # an unsupported chart_type gets a clear, specific error message here instead of a dataclass
-    # TypeError - but the two MUST list the same values by hand, since _validate_chart_request
-    # below passes validated kwargs straight into ChartSpec(**kwargs) unchanged.
     _VALID_CHART_TYPES = {"bar", "line", "timeline", "scatter3d", "surface"}
 
     def create_visualizations(self, visualizations: list[dict]) -> dict:
@@ -224,11 +184,6 @@ class TabularTools:
         charts = []
         errors = []
         for index, raw in enumerate(visualizations or []):
-            # NOTE: this key is deliberately "requested_file_id", not "file_id" - TabularAgent.
-            # run()'s _extract_refs regex-scans this tool's own RESULT line for a literal
-            # `"file_id": "..."` shape to recover real artifact ids from run_python/query_data
-            # results. Using "file_id" here too would let a failed chart request's (possibly
-            # perfectly real) file_id leak into that extraction as a false positive.
             requested_file_id = raw.get("file_id") if isinstance(raw, dict) else None
             try:
                 spec_kwargs, error = self._validate_chart_request(raw)
@@ -241,14 +196,6 @@ class TabularTools:
 
             try:
                 chart_id = new_artifact_id(f"chart_{spec_kwargs['chart_type']}")
-                # worker_service's _persist_artifacts recovers a chart's DB title from its
-                # containing folder's name (see investigation.py's _artifact_title), so the
-                # folder name should stay recognizable - but two charts in this SAME batch can
-                # easily share (or nearly share) a title, and _new_folder would then put both in
-                # the identical dated folder, silently overwriting one chart.html with the
-                # other's before persistence even runs. chart_id (always unique - see
-                # new_artifact_id) goes first so it survives _new_folder's 60-char truncation
-                # regardless of how long the title is, guaranteeing two charts never collide.
                 folder_name = f"{chart_id}_{spec_kwargs['title'][:30]}"
                 location = self.reporting.render_single_chart(
                     self.workspace_id, ChartSpec(**spec_kwargs), name=folder_name,
@@ -283,10 +230,6 @@ class TabularTools:
         return {"status": status, "charts": charts, "errors": errors}
 
     def _validate_chart_request(self, raw) -> tuple:
-        """Returns (spec_kwargs, None) for a valid chart request, or (None, error_message)
-        otherwise - the same checks the old single-chart propose_visualization used to make per
-        call, factored out so create_visualizations can run them independently for each item in
-        a batch without one bad entry aborting the rest."""
         if not isinstance(raw, dict):
             return None, f"each visualization request must be an object/dict, got {type(raw).__name__}"
 
@@ -360,9 +303,6 @@ class TabularTools:
         chart_type, label_column, value_columns, time_column, series_column, value_column,
         x_column, y_column, z_column,
     ) -> Optional[str]:
-        """Mirrors tools.reporting.models.ChartSpec's own docstring on which column combination
-        each chart_type actually needs - returns a human-readable (and model-readable) message
-        naming exactly what's missing, or None if the given combination is valid."""
         if chart_type in ("bar", "line"):
             wide = bool(label_column and value_columns)
             tidy = bool(label_column and series_column and value_column)
@@ -394,9 +334,6 @@ class TabularTools:
         return None
 
     def inspect_schema(self, file_id: str) -> SchemaInfo:
-        """Return column names, dtypes, nullability, and likely key columns for ALL columns of one
-        assigned file in a single call - there is no per-column filter, so never pass a `column`
-        argument and never call this more than once per file_id."""
         self._check_assigned(file_id)
         table = self._table(file_id)
 
@@ -426,7 +363,6 @@ class TabularTools:
         }
 
     def sample_rows(self, file_id: str, n: int = 5) -> list:
-        
         self._check_assigned(file_id)
         n = min(n, 50)
         table = self._table(file_id)
@@ -435,7 +371,6 @@ class TabularTools:
         return [dict(zip(columns, row)) for row in result.fetchall()]
 
     def find_join_candidates(self, file_ids: list) -> list:
-        
         for file_id in file_ids:
             self._check_assigned(file_id)
 
@@ -479,22 +414,6 @@ class TabularTools:
         preview_rows: int = 10,
         timeout_seconds: int = 15,
     ) -> QueryResult:
-        """Run a SQL query against the given assigned files. Write the SQL using each file's
-        table_name (from list_allowed_files/inspect_schema), never its file_id - file_id can
-        contain characters (dots, hyphens) that are not valid unquoted SQL identifiers.
-
-        This always returns only a small preview of the result (up to preview_rows, capped at
-        20) plus the true row_count and columns - never the full result set - so raw row data
-        stays out of your context regardless of how many rows the query actually matches. If data
-        is more that capped rows, prepare a dashboard.
-
-        Set persist=True whenever the objective needs the actual computed data to exist
-        afterward (the user asked for this result as a CSV, dashboard, or report, not just an
-        answer in words) - this writes the FULL result (not just the preview) to a new Parquet
-        file and returns its file_id, which you should report in your findings' artifact_refs.
-        When persist=True, also pass name: a short, descriptive label for what's in the result
-        (e.g. "revenue_by_region"). Leave persist=False when you only need to see the result
-        yourself to answer in words."""
         for file_id in file_ids:
             self._check_assigned(file_id)
         preview_rows = max(1, min(preview_rows, 20))
@@ -532,17 +451,6 @@ class TabularTools:
         filters: Optional[dict] = None,
         name: Optional[str] = None,
     ) -> QueryResult:
-        """Group-by + sum/avg/count/min/max convenience wrapper over query_data.
-        Each item in metrics must have: column (str), op (one of sum|avg|count|min|max), alias (optional str).
-        Each metric applies its op to the WHOLE column within each group - there is no per-value
-        condition. For "count of X where column = A" vs "where column = B" within the same
-        group (e.g. male vs female counts per job title), this tool cannot express that; use
-        query_data with raw SQL (CASE WHEN ... END, or FILTER (WHERE ...)) instead.
-
-        Always persists the FULL aggregated result to a new Parquet file and returns only a
-        capped preview (up to 20 rows) plus file_id, row_count, and truncated - never the
-        whole result set, regardless of how many groups it has. Pass `name`: a short label for
-        what's in the result (e.g. "revenue_by_region")."""
         for file_id in file_ids:
             self._check_assigned(file_id)
         if self.storage is None:
@@ -588,9 +496,6 @@ class TabularTools:
         return MetricSpec(column=metric["column"], op=op, alias=metric.get("alias"))
 
     def describe_column(self, file_id: str, column: str) -> ColumnProfile:
-        """Profile one column: min/max/mean, null count, distinct count, and top values.
-        mean is only meaningful for numeric columns - it's None for text/date/other columns
-        rather than erroring."""
         self._check_assigned(file_id)
         table = self._table(file_id)
         quoted_col = self._quote_ident(column)
@@ -619,7 +524,6 @@ class TabularTools:
         )
 
     def validate_result(self, result: QueryResult, expected_shape: Optional[dict] = None) -> ValidationReport:
-        
         warnings = []
 
         if result.row_count == 0:

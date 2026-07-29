@@ -49,11 +49,6 @@ afterward, so make it the complete, polished answer:
 """
 
 
-
-# Appended to SYSTEM_MESSAGE only when this agent is invoked DIRECTLY from the controller's
-# intent-routing (see worker_service/tasks/investigation.py's _run_document_direct) instead of
-# being delegated to by the Orchestrator - same reasoning as agents/tabular/config.py's own
-# DIRECT_ROUTE_ADDENDUM.
 DIRECT_ROUTE_ADDENDUM = """
 
 Direct-route mode: you were invoked DIRECTLY for this request - there is no Orchestrator

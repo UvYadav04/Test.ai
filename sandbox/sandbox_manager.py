@@ -1,28 +1,3 @@
-"""Host-side lifecycle manager for persistent sandbox containers - one container per
-investigation_id, reused across every run_python() call that investigation makes (see
-sandbox_executor.py's PythonSandbox, the only intended caller of this module besides
-worker_service's own startup/shutdown wiring).
-
-Why keyed by investigation_id, not workspace_id or a global pool: an investigation is one
-orchestrator run (worker_service/tasks/investigation.py's run_investigation) - it may delegate
-to the Tabular Agent, and therefore call run_python, many times over its lifetime, each time
-through a NEW TabularAgent/TabularTools instance (see agents/tabular/agent.py). Keying the cache
-by investigation_id is what lets all of those short-lived instances land on the exact same warm
-container instead of each paying Docker-create + interpreter-boot again. Keying it any more
-broadly (e.g. by workspace_id, which usually outlives a single investigation) would mean two
-investigations running concurrently in the same workspace could execute inside the SAME
-container at the same time - that's the one thing this module must never allow (see the
-class docstring below) - so investigation_id, which this codebase already treats as unique per
-chat turn, is the right granularity.
-
-docker-outside-of-docker note: same as sandbox_executor.py/path_resolver.py before this file
-existed - `self.client` is `docker.from_env()`, which talks to the HOST's Docker daemon when
-worker_service itself runs containerized with /var/run/docker.sock bind-mounted in. Both the
-parquet volume AND the new sandbox-socket volume below are named Docker volumes (not bind
-mounts) for exactly the reason those files already document: the host daemon resolves a volume
-NAME identically regardless of which container asks for it, so worker_service and every sandbox
-sibling container it creates can share one without agreeing on any host filesystem path.
-"""
 import logging
 import os
 import threading
@@ -39,16 +14,8 @@ logger = logging.getLogger("sandbox.manager")
 IMAGE_NAME = "dataanalyzer-sandbox:latest"
 _SANDBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Same named-volume convention as sandbox_executor.py's PARQUET_VOLUME_NAME - override if your
-# deployment's COMPOSE_PROJECT_NAME/directory name isn't "dataanalyzer" (`docker volume ls`
-# shows the real runtime name).
 PARQUET_VOLUME_NAME = os.environ.get("PARQUET_VOLUME_NAME", "dataanalyzer_parquet_data")
 
-# Backs the .sock files this module creates/waits on and every sandbox container serves from -
-# see docker-compose.yml's `sandbox_sockets` volume. Mounted at SANDBOX_SOCKET_CONTAINER_MOUNT
-# inside every sandbox container; this process's OWN mount point for the same volume is
-# `socket_root` (constructor arg, from worker_service's SANDBOX_SOCKET_ROOT - see
-# engine_bootstrap.py), independent of this container-side path.
 SANDBOX_SOCKET_VOLUME_NAME = os.environ.get("SANDBOX_SOCKET_VOLUME_NAME", "dataanalyzer_sandbox_sockets")
 SANDBOX_SOCKET_CONTAINER_MOUNT = "/shared"
 
@@ -62,13 +29,6 @@ class SandboxManagerError(RuntimeError):
 
 
 class _SandboxHandle:
-    """One live container + its client, cached in SandboxManager._sandboxes. `lock` serializes
-    concurrent execute() calls FOR THIS INVESTIGATION ONLY (arq's max_jobs can run this worker's
-    jobs concurrently, and nothing stops two tool calls within one investigation's orchestrator
-    loop from racing in unusual code paths) - the sandbox server itself handles one request at a
-    time regardless, but taking this lock host-side gives cleaner timeout/error attribution than
-    letting two requests queue invisibly inside Uvicorn."""
-
     __slots__ = ("investigation_id", "container", "client", "socket_path", "created_at", "last_used_at", "lock")
 
     def __init__(self, investigation_id: str, container, client: SandboxClient, socket_path: str):
@@ -82,22 +42,6 @@ class _SandboxHandle:
 
 
 class SandboxManager:
-    """Different investigations must NEVER share execution state: each investigation_id gets its
-    own container, its own socket file, its own ExecutionEngine instance inside that container -
-    never a container (or a warm namespace/DuckDB connection inside one) reused across two
-    different investigation_ids. That isolation is what makes this safe to reuse a container
-    WITHIN one investigation at all (see module docstring) - the boundary this class enforces is
-    per-investigation, not per-call.
-
-    Lifecycle: get_or_create() creates a container + waits for /health on the first call for a
-    given investigation_id, and returns the same cached SandboxClient on every later call.
-    release() destroys a specific investigation's sandbox immediately (called from
-    worker_service/tasks/investigation.py when that investigation ends). The background idle
-    reaper is a safety net for investigations that never call release() cleanly (a worker crash,
-    an unhandled exception escaping the caller's own cleanup) - it destroys any sandbox unused
-    for longer than idle_timeout_seconds.
-    """
-
     def __init__(
         self,
         socket_root: str,
@@ -156,14 +100,7 @@ class SandboxManager:
             self.client.images.build(path=_SANDBOX_DIR, tag=self.image, rm=True)
             logger.info("sandbox image built in %.3fs", time.perf_counter() - start)
 
-    # ------------------------------------------------------------------ creation / reuse
-
     def get_or_create(self, investigation_id: str) -> SandboxClient:
-        """Every path through here logs WHY it did what it did (reused / recreated because
-        unhealthy / created because none existed) - see _liveness's reason string and the three
-        logger calls below - so "why did this take 2-3s" is always answerable from the logs
-        alone, without having to guess between "first ever call for this investigation" and
-        "the container died and had to be rebuilt"."""
         try:
             validate_segment(investigation_id, "investigation_id")
         except InvalidArtifactIdError as exc:
@@ -206,10 +143,6 @@ class SandboxManager:
             return handle.client
 
     def _liveness(self, handle: _SandboxHandle) -> tuple[bool, str | None]:
-        """(is_alive, reason_if_not) - the reason string is purely for the "sandbox unhealthy"
-        log line above, so a dead container's cause (Docker daemon lost track of it vs. the
-        container process itself exited/crashed vs. some other status) is visible without
-        needing to go dig through `docker ps -a`/`docker logs` by hand."""
         try:
             handle.container.reload()
         except Exception as exc:
@@ -238,9 +171,6 @@ class SandboxManager:
         container = self.client.containers.run(
             self.image,
             detach=True,
-            # No network access, same as the old one-shot container - a Unix domain socket over
-            # a shared filesystem volume needs no network namespace at all, so this security
-            # property carries over unchanged.
             network_disabled=True,
             mem_limit=self.mem_limit,
             nano_cpus=self.nano_cpus,
@@ -302,8 +232,6 @@ class SandboxManager:
             f"{self.health_timeout_seconds}s ({attempt} attempt(s)): {last_error}"
         )
 
-    # ------------------------------------------------------------------ execution
-
     def execute(
         self, investigation_id: str, code: str, tables: dict, workspace_id: str,
         timeout_seconds: float = None,
@@ -333,14 +261,7 @@ class SandboxManager:
             )
             return result
 
-    # ------------------------------------------------------------------ cleanup
-
     def release(self, investigation_id: str) -> None:
-        """Called when an investigation ends (worker_service/tasks/investigation.py's finally
-        block, and dashboard_refresh.py after its one-off sandbox call) - destroys that
-        investigation's container/socket immediately rather than waiting for the idle reaper, so
-        a busy worker doesn't accumulate one warm container per completed investigation
-        indefinitely."""
         with self._global_lock:
             handle = self._sandboxes.pop(investigation_id, None)
         if handle is None:
@@ -389,9 +310,6 @@ class SandboxManager:
                 self.release(inv_id)
 
     def shutdown_all(self) -> None:
-        """Called from worker_service's on_shutdown - releases every sandbox still cached
-        (e.g. jobs that crashed before reaching their own cleanup) and stops the reaper thread so
-        the process can exit cleanly."""
         logger.info("SandboxManager shutdown: releasing %d sandbox(es)", len(self._sandboxes))
         self._reaper_stop.set()
         with self._global_lock:
@@ -405,14 +323,6 @@ _default_manager: "SandboxManager | None" = None
 
 
 def get_manager(socket_root: str = None, **kwargs) -> SandboxManager:
-    """Process-wide singleton - an arq worker is one process serving many jobs, and every job
-    (and every PythonSandbox instance any of those jobs construct) needs to land on the SAME
-    manager to actually get cache reuse/idle cleanup across calls. worker_service.worker.py's
-    on_startup calls this once explicitly (with socket_root=engine_bootstrap.SANDBOX_SOCKET_ROOT)
-    so the instance - and any non-default kwargs - are established before any job runs; later
-    calls from PythonSandbox/investigation.py omit socket_root and just get that same instance
-    back. Only used when running this codebase as a bare script/test WITHOUT going through
-    worker.py's on_startup does socket_root's own fallback default below actually get used."""
     global _default_manager
     if _default_manager is None:
         with _manager_lock:

@@ -24,7 +24,6 @@ Writing Python
 - Only make another run_python call if you need the previous result.
 - Check that your result is correct before finishing (for example, make sure it is not empty and expected columns exist).
 - If the query needs small data just make it print, no need to create df and .parqeut files for each query.
-- Tool execution
 
 Whenever you execute Python, call:
 
@@ -77,13 +76,6 @@ Final reply
 """
 
 
-
-# Appended to SYSTEM_MESSAGE only when this agent is invoked DIRECTLY from the controller's
-# intent-routing (see worker_service/tasks/investigation.py's _run_tabular_direct) instead of
-# being delegated to by the Orchestrator. Two things differ in that case: there is no
-# Orchestrator afterward to reformat/verify the reply, and no Orchestrator reasoning step
-# narrowed down which file(s) apply - both need to be said explicitly, or the base prompt
-# (written for the delegated case) would leave the model assuming context it doesn't have.
 DIRECT_ROUTE_ADDENDUM = """
 
 Direct-route mode: you were invoked DIRECTLY for this request - there is no Orchestrator

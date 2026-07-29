@@ -1,19 +1,3 @@
-"""Wraps any autogen ChatCompletionClient so every `.create()` call is
-reported to Langfuse as a "generation" observation (model, input messages,
-output, token usage, latency, errors) - without changing call behavior.
-Same wrap-and-delegate pattern as fallback_client.FallbackChatCompletionClient.
-
-Deliberately does NOT import from Server/shared/ - analyzerEngine is meant to
-stay importable as its own root (see worker_service/engine_bootstrap.py's
-docstring), so this reads Langfuse credentials via analyzerEngine's own
-config.get_settings(), same as every provider module in llm_provider/providers/.
-
-No-ops (zero overhead beyond one dict lookup) if LANGFUSE_PUBLIC_KEY /
-LANGFUSE_SECRET_KEY aren't set - Langfuse tracing is additive, same as the
-Loki logging setup in shared/logging_config.py. The Langfuse SDK also
-catches and logs its own internal errors rather than raising them, so a
-bad/unreachable Langfuse host degrades to "no tracing", not a broken LLM call.
-"""
 import json
 import logging
 import time
@@ -33,18 +17,6 @@ from config import get_settings
 
 logger = logging.getLogger("llm_provider.langfuse")
 
-# Separate logger for the FULL raw request/response of every LLM call (whole message list -
-# system prompt + every prior user/assistant/tool message the model is about to see - plus the
-# complete tool schemas exposed on that call, and the model's raw response). `logger` above stays
-# a one-line-per-call summary (provider/model/duration/token counts) for normal operation.
-#
-# Turned OFF by default (setLevel(WARNING) below) - a full message/tool-schema dump on every
-# single LLM call is far too long/noisy for normal operation. To turn it back on temporarily
-# (e.g. to debug exactly what's being sent to the model), set this logger's level to INFO -
-# `logging.getLogger("llm_provider.calls").setLevel(logging.INFO)` - from wherever you configure
-# logging (shared/logging_config.py, or just at the top of a one-off script). Every call site
-# below checks isEnabledFor(INFO) before doing the (non-trivial) serialization work, so leaving
-# this at WARNING costs nothing beyond the one isEnabledFor check per call.
 calls_logger = logging.getLogger("llm_provider.calls")
 calls_logger.setLevel(logging.WARNING)
 
@@ -53,9 +25,6 @@ _langfuse_checked = False
 
 
 def _get_langfuse():
-    """Lazy singleton, same shape as llm_provider's other module-level state.
-    Returns None (and stays None) if Langfuse isn't configured, so callers
-    can just check `if langfuse is None: skip tracing` once per call."""
     global _langfuse_client, _langfuse_checked
     if _langfuse_checked:
         return _langfuse_client
@@ -83,16 +52,6 @@ def _get_langfuse():
 
 
 def _serialize_messages(messages):
-    """Best-effort JSON-able view of autogen LLMMessage objects for Langfuse's
-    `input` field - these are typed objects (SystemMessage/UserMessage/...),
-    not plain dicts, so pull role/content defensively instead of assuming a
-    fixed shape that might not hold across every message type.
-
-    This IS the "whole prompt" - autogen's model_context accumulates the entire conversation
-    (system message, the original task, every prior assistant turn, every tool call and its
-    result) and hands the FULL list back to ChatCompletionClient.create() on every single call,
-    never just the newest message - so serializing `messages` in full, as calls_logger's request
-    line does below, already captures the whole prompt AND every previous message in one shot."""
     out = []
     for m in messages:
         role = getattr(m, "type", None) or getattr(m, "role", None) or type(m).__name__
@@ -104,10 +63,6 @@ def _serialize_messages(messages):
 
 
 def _serialize_tools(tools):
-    """Full schema (name, description, parameters JSON-schema) for every tool exposed to the
-    model on this call - not just a count. `tools` items are either autogen_core `Tool`
-    instances (real objects with a `.schema` property) or plain `ToolSchema` dicts already -
-    autogen's AssistantAgent passes the former, but this stays defensive either way."""
     out = []
     for t in tools or []:
         try:
@@ -130,12 +85,6 @@ def _safe_json(value) -> str:
 
 
 class LangfuseTracedChatCompletionClient(ChatCompletionClient):
-    """Wraps `inner` (a plain provider client, or a FallbackChatCompletionClient
-    - either way, whatever actually ends up serving the call) so each
-    `.create()` becomes one Langfuse generation. Wrap the OUTERMOST client in
-    provider.py so a fallback-provider call still produces exactly one trace
-    entry, tagged with whichever provider actually handled it."""
-
     def __init__(self, inner: ChatCompletionClient, provider_name: str, model: str = None):
         self._inner = inner
         self._provider_name = provider_name
@@ -143,20 +92,8 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
 
     async def create(self, messages, *, tools=[], tool_choice="auto", json_output=None,
                       extra_create_args={}, cancellation_token=None) -> CreateResult:
-        """Every LLM call, from every agent (hypothesis/tabular/document/orchestrator all go
-        through this same wrapper - it's the outermost layer LLMProvider._wrap applies
-        unconditionally, see provider.py), passes through here. Duration is logged via
-        `logger` below on every call regardless of whether Langfuse itself is configured -
-        Langfuse's own latency_s metadata (inside _create_and_trace) is for the Langfuse UI;
-        this log line is what shows up in worker_service's own console/logs.
-
-        `calls_logger` below additionally logs the COMPLETE request (every message in
-        `messages` - the whole accumulated prompt, system message included, plus every earlier
-        turn - and every tool's full name/description/parameter schema in `tools`) before the
-        call, and the raw response content after - see _serialize_messages/_serialize_tools."""
         start = time.monotonic()
-        call_id = id(messages)  # cheap correlation key to pair this call's request/response
-        # line/error line in the log stream, since concurrent calls can interleave.
+        call_id = id(messages)
         if calls_logger.isEnabledFor(logging.INFO):
             calls_logger.info(
                 "llm request [%x] %s/%s - %d message(s), %d tool(s), tool_choice=%s:\n%s",
@@ -206,9 +143,6 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
             )
 
         start = time.monotonic()
-        # Langfuse v4 unified start_span/start_generation into start_observation(as_type=...).
-        # See https://langfuse.com/docs/observability/sdk/upgrade-path/python-v3-to-v4 -
-        # `as_type="generation"` is the direct replacement for the old start_generation() call.
         generation = langfuse.start_observation(
             name=f"{self._provider_name}.create",
             as_type="generation",
@@ -248,10 +182,6 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
 
     async def create_stream(self, messages, *, tools=[], tool_choice="auto", json_output=None,
                              extra_create_args={}, cancellation_token=None):
-        # Not traced in Langfuse - the tool-calling agent loop (orchestrator/tabular/
-        # document agents) uses .create(), not streaming; add Langfuse tracing here if
-        # create_stream starts seeing real use. Duration IS logged locally either way, same
-        # as .create() above, so a streaming caller isn't left with zero timing visibility.
         start = time.monotonic()
         call_id = id(messages)
         if calls_logger.isEnabledFor(logging.INFO):

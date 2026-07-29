@@ -1,18 +1,3 @@
-"""Deterministic file-metadata brief for the Document Agent (NOT the Document Processor - it
-never has a "first tool call to waste" problem since it always reads everything anyway).
-
-Computed straight from the file catalog (filename, file_type, page_count - already known, zero
-extra cost) plus the vector store (chunk_count, estimated_token_count, section headings,
-table_count - the exact same deterministic lookups list_file_sections/list_tables already do,
-just called directly in plain Python instead of exposed as an LLM tool call). Handed to
-DocumentAgent.run() as `metadata_brief` and prepended to its very first task message, so the
-agent's first real reasoning step is the actual objective, not a get_file_overview() call to
-learn things the backend already knows for free.
-
-Fields the design doc asked for that this ingestion pipeline doesn't currently produce anywhere
-(document title, figure_count, a short description/overview) are simply omitted rather than
-fabricated - see the per-file loop below.
-"""
 from tools.document.token_estimate import estimate_tokens
 
 _MAX_SECTIONS_SHOWN = 20

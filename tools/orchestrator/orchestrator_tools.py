@@ -36,42 +36,18 @@ class OrchestratorTools:
     ):
         self.catalog = catalog
         self.state = state
-        # Defaults to a fresh, throwaway collector if the caller doesn't hand one in (e.g. a
-        # test constructing OrchestratorTools directly) - real runs always get one threaded down
-        # from worker_service.tasks.investigation.run_investigation via OrchestratorAgent, see
-        # its own __init__. Every invoke_*/generate_* method below registers into this directly,
-        # right when its own result comes back - see FinalResultCollector's docstring for why.
         self.result_collector = result_collector or FinalResultCollector()
         self.storage = storage
         self.workspace_id = "default"
-        # Handed straight through to invoke_tabular_agent -> TabularAgent -> TabularTools ->
-        # PythonSandbox, so every Tabular Agent this orchestrator delegates to during THIS
-        # investigation reuses the same persistent sandbox container - see
-        # sandbox/sandbox_manager.py's docstring for why investigation_id (not workspace_id) is
-        # the right cache key.
         self.investigation_id = investigation_id
-        # The real SandboxManager instance - see OrchestratorAgent.__init__'s note on why this
-        # is passed explicitly instead of re-resolved via get_manager() at this layer.
         self.sandbox_manager = sandbox_manager
         self._vector_store = vector_store
         self._reranker = reranker
         self.memory = memory or LongTermMemory()
         self.hypothesis_tools = HypothesisTools()
         self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
-        # Forwarded to every TabularAgent this orchestrator delegates to (see
-        # invoke_tabular_agent below) so its own create_visualizations tool renders charts into
-        # the same reports scratch space generate_csv/generate_markdown_report/generate_dashboard
-        # already use here.
         self.reports_dir = reports_dir
-        # Set per-run by OrchestratorAgent.run() (there's no `run` call on
-        # this class itself to hand it in through). Forwarded into the
-        # delegated Tabular/Document agent's own run() so its tool calls
-        # (run_python, search_documents, ...) stream as events too, not just
-        # invoke_tabular_agent/invoke_document_agent's own start event.
         self.on_event = None
-        # Most recent tabular run_python call's code/file_ids, captured off the
-        # TabularAgent instance after each invoke_tabular_agent call - see the note
-        # there. Only read by generate_dashboard (persistent/refreshable dashboards).
         self._last_transform_script: Optional[str] = None
         self._last_tabular_file_ids: list = []
 
@@ -203,20 +179,11 @@ class OrchestratorTools:
 
         result = await agent.run(effective_objective, constraints, on_event=self.on_event)
 
-        # Stashed off the agent object itself (not part of `result`/TabularFindings - see
-        # TabularAgent.__init__'s note) so generate_dashboard can find the script that produced
-        # this call's data without it ever entering the orchestrator LLM's own context. Each
-        # invoke_tabular_agent call overwrites this - a real-time dashboard's sections must all
-        # come from the SAME (most recent) tabular call, see generate_dashboard's docstring.
         if agent.last_transform_script:
             self._last_transform_script = agent.last_transform_script
             self._last_tabular_file_ids = agent.last_transform_file_ids
 
         if must_export:
-            # agent.py's _real_refs already confirmed each of these is a file_id that really
-            # exists on disk (see agents/tabular/agent.py) - this is just the final "did it
-            # look like an id at all" shape check, now against a short [0-9a-zA-Z_-]+ token
-            # instead of the old ".parquet"/"/"/"\\" path-shape sniffing.
             valid_refs = [ref for ref in result.artifact_refs if isinstance(ref, str) and _looks_like_file_id(ref)]
             if not valid_refs:
                 raise RuntimeError(
@@ -227,10 +194,6 @@ class OrchestratorTools:
                 )
             result.artifact_refs = valid_refs
 
-        # Registered here (after the must_export filtering above, so a fabricated ref never
-        # gets in) rather than deferred to run()'s final return - this survives regardless of
-        # whether the orchestrator makes more tool calls after this one, or the run eventually
-        # raises before ever reaching a final answer. See FinalResultCollector's docstring.
         self.result_collector.add_tabular_findings(
             result, "invoke_tabular_agent", [f.file_id for f in assigned_files],
         )
@@ -250,9 +213,6 @@ class OrchestratorTools:
         constraints = constraints or {}
         self.state.selected_files.extend(f.file_id for f in assigned_files)
         vector_store = self._get_vector_store()
-        # Deterministic backend lookup (catalog + vector store), never an LLM tool call - see
-        # tools/document/metadata.py. Lets the agent's first real reasoning step be the
-        # objective itself instead of a get_file_overview() call to learn this.
         metadata_brief = build_document_metadata_brief(
             self.catalog, vector_store, [f.file_id for f in assigned_files],
         )
@@ -393,9 +353,6 @@ class OrchestratorTools:
         return manifest_path
 
     def _known_artifact_refs(self) -> list:
-        """Every real file_id this investigation has actually produced so far - pulled from
-        the TabularFindings/DocumentFindings already recorded on self.state by _record_event,
-        never re-derived or guessed. Ground truth for _resolve_file_id's typo correction."""
         refs = []
         for event in self.state.completed_tasks:
             for ref in getattr(event.result, "artifact_refs", None) or []:
@@ -404,9 +361,6 @@ class OrchestratorTools:
         return refs
 
     def _artifact_path(self, file_id: str) -> Optional[str]:
-        """Full on-disk path for a file_id under this orchestrator's own workspace, or None if
-        it isn't a resolvable id at all (never raises - _resolve_file_id below is what turns
-        "doesn't exist" into a helpful error)."""
         if self.storage is None:
             return None
         try:
@@ -415,18 +369,13 @@ class OrchestratorTools:
             return None
 
     def _resolve_file_id(self, file_id: str) -> str:
-        """Resolve and validate a generated artifact file_id.
-
-        Checks that the file_id refers to an existing artifact from the current
-        investigation. If needed, automatically corrects minor typos in the file_id.
-        Raises an error only if no matching artifact can be found."""
         path = self._artifact_path(file_id)
         if path is not None and self.storage.exists(path):
             return file_id
 
         known = self._known_artifact_refs()
         if not known:
-            return file_id  # nothing to correct against - let the caller's own error surface
+            return file_id
 
         best_ref, best_score = None, 0.0
         for ref in known:
@@ -462,30 +411,12 @@ class OrchestratorTools:
         if entry is None:
             raise ValueError(f"file_id '{file_ref.file_id}' not found in catalog")
         if not is_tabular_output_ref(entry.output_ref):
-            # Belt-and-suspenders, not the primary defense anymore: list_files/search_files/the
-            # per-turn catalog brief all filter through FileCatalog.is_browsable now, so an xlsx
-            # workbook's own file_id (output_ref="" - a workbook has no single "whole file"
-            # parquet, see xlsx_ingestor.py) is never shown to the orchestrator to pick in the
-            # first place. This still fires for a PDF's main file_id (output_ref is a
-            # vector-store pointer, "workspace_{id}", not a real artifact id - same ambiguity
-            # worker_service/tasks/investigation.py works around on the ingestion side) - PDFs
-            # stay visible/browsable since invoke_document_agent needs that exact file_id, so
-            # this is still the first line of defense against handing a PDF's file_id to
-            # invoke_tabular_agent by mistake. Also covers any stale file_id reaching here
-            # another way (an older chat's thread_context.files_used, etc.) rather than only
-            # ones just seen via list_files this turn. Raising here - before a TabularAgent is
-            # even created - lets the model self-correct immediately instead of burning a whole
-            # invoke_tabular_agent round trip on a guaranteed failure several turns later, deep
-            # inside the Docker sandbox.
             raise ValueError(
                 f"file_id '{file_ref.file_id}' ('{entry.filename}') has no queryable tabular "
                 "data of its own - it's a PDF or xlsx workbook's main entry, not an actual "
                 "table. Call list_tables to find the individual table file_id(s) extracted from "
                 "it, and pass those to invoke_tabular_agent instead."
             )
-        # TabularFileRef only carries file_id/filename now - the real parquet path is derived
-        # on demand inside TabularTools via get_parquet_path(root_dir, workspace_id, file_id),
-        # never read off the catalog entry as a string.
         return TabularFileRef(file_id=entry.file_id, filename=entry.filename)
 
     def _get_vector_store(self):

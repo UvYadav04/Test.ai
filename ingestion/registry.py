@@ -1,10 +1,3 @@
-"""Maps file extensions to ingestor classes.
-
-Adding a new file type = add a new folder under ingestion/file_types/ with
-an ingestor implementing BaseIngestor, then register its extension(s) here.
-The manager never branches on file type itself -- it always goes through
-get_ingestor_for().
-"""
 import os
 from typing import Type
 

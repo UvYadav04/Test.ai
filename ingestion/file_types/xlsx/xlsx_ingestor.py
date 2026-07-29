@@ -6,15 +6,6 @@ from ingestion.models import IngestionResult
 
 
 class XLSXIngestor(BaseIngestor):
-    """Multi-table format - a workbook can hold several sheets, and a sheet can hold several
-    stacked/side-by-side tables (see xlsx/utils.py) - so it doesn't fit SingleTableIngestor's
-    one-dataframe shape. Follows PDFIngestor's extracted_tables pattern instead: there's no
-    single "primary" table, every detected table gets its own parquet write and its own entry
-    in IngestionResult.extracted_tables (the same mechanism table_catalog_entry() already
-    generalized for pdf). No vector_store involved - like csv/json this is pure tabular data,
-    no free text to chunk/embed. Charts, images, and embedded objects are intentionally not
-    read - only cell values."""
-
     def __init__(self, storage=None, vector_store=None):
         super().__init__(storage=storage, vector_store=vector_store)
         self.errors = []
@@ -70,8 +61,6 @@ class XLSXIngestor(BaseIngestor):
                     dataframe = table["dataframe"]
                     table_file_id = f"{file_id}_table_{len(extracted_tables)}"
 
-                    # output_ref == table_file_id now, not storage.write()'s return value - see
-                    # the note in ingestion/file_types/base.py's ingest().
                     self.storage.write(dataframe, f"{workspace_id}/{table_file_id}.parquet")
                     output_ref = table_file_id
                     columns = [str(c) for c in dataframe.columns]

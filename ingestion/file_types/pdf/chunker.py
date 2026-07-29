@@ -47,10 +47,6 @@ class DoclingChunker(BaseChunker):
 
 
 class FixedSizeChunker(BaseChunker):
-    """Plain sliding-window chunker: fixed character length with overlap, no layout/heading
-    awareness. Used by TXTIngestor (plain text has no page/heading structure for
-    DoclingChunker to key off) and swappable into PDFIngestor for the same reason."""
-
     def __init__(self, chunk_size: int = 1000, overlap: int = 100):
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
@@ -60,8 +56,6 @@ class FixedSizeChunker(BaseChunker):
         self.overlap = overlap
 
     def chunk_document(self, document) -> list:
-        """`document` is either a docling document (export_to_text() is called first) or
-        already a plain string."""
         text = document.export_to_text() if hasattr(document, "export_to_text") else str(document)
         text = text.strip()
         if not text:

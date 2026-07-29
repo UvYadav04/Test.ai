@@ -1,12 +1,3 @@
-"""Wraps a ChatCompletionClient with bounded retry-with-backoff for genuinely transient errors
-(connection blips, provider 5xx) - deliberately NOT for rate limits, which are frequently a
-daily/monthly quota rather than a per-second burst, so retrying blindly can just hold a worker
-slot for however long that window turns out to be (see errors.py's classify_llm_error).
-
-Composed in provider.py between the raw/fallback client and LangfuseTracedChatCompletionClient,
-so a Langfuse generation reflects the final outcome (with attempt count in its metadata) rather
-than one entry per retry.
-"""
 import asyncio
 import logging
 import random
@@ -58,12 +49,10 @@ class RetryingChatCompletionClient(ChatCompletionClient):
                     info.kind, attempt, self._max_attempts, delay, exc,
                 )
                 await asyncio.sleep(delay)
-        raise last_exc  # unreachable - loop always either returns or raises above
+        raise last_exc
 
     async def create_stream(self, messages, *, tools=[], tool_choice="auto", json_output=None,
                              extra_create_args={}, cancellation_token=None):
-        # Not retried - once streaming has started and the caller may have already consumed/acted
-        # on partial chunks, transparently replaying the call from scratch isn't safe.
         async for chunk in self._inner.create_stream(
             messages, tools=tools, tool_choice=tool_choice, json_output=json_output,
             extra_create_args=extra_create_args, cancellation_token=cancellation_token,

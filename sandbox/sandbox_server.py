@@ -1,22 +1,3 @@
-"""Entrypoint for the sandbox Docker image (see Dockerfile) - replaces the old one-shot
-runner.py. Starts a long-lived FastAPI/Uvicorn server bound to a Unix Domain Socket (never a TCP
-port - this container has no network access at all, see network_disabled=True in
-sandbox_manager.py) and keeps it running for the lifetime of one investigation, serving every
-run_python() call the host makes during that investigation over the same warm process.
-
-The socket lives on a named Docker volume shared with the worker_service host process (see
-sandbox_manager.py's SANDBOX_SOCKET_VOLUME_NAME / SANDBOX_SOCKET_CONTAINER_MOUNT and
-docker-compose.yml's `sandbox_sockets` volume) - that's the ONLY way these two otherwise-isolated
-sibling containers can see the same .sock file, the exact same named-volume trick
-sandbox_manager.py/path_resolver.py already use for the parquet data itself (see those files'
-own docstrings for why a named volume, not a bind mount, is what makes docker-outside-of-docker
-work here at all).
-
-SANDBOX_ID (an env var set by SandboxManager to the investigation_id) determines this
-container's own socket filename - flat inside the shared volume root (no per-investigation
-subdirectory: standalone `docker run`/docker-py volume mounts can't bind a sub-path of a named
-volume, only the whole volume, so every sandbox container mounts the SAME volume root and picks
-its own file within it by name instead)."""
 import logging
 import os
 import signal
@@ -87,10 +68,6 @@ def reset():
 
 @app.post("/shutdown")
 def shutdown():
-    """Acknowledges the request, then triggers a graceful process exit shortly after responding
-    (can't stop the server from inside the same request handler that's serving the response for
-    it) - SandboxManager also just removes/kills the container directly on release(), so this
-    endpoint is a courtesy for a clean self-shutdown path, not the only way this container dies."""
     logger.info("shutdown requested (sandbox=%s)", SANDBOX_ID)
 
     def _stop():

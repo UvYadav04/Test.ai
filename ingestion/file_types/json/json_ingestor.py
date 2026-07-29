@@ -13,12 +13,6 @@ from ingestion.file_types.json.utils import (
 
 
 class JSONIngestor(SingleTableIngestor):
-    """extract_metadata/ingest come from SingleTableIngestor - this class supplies the
-    JSON-specific bits: record extraction/flattening, stringifying list/dict columns so
-    parquet can store them, and its own validate() (JSON validity is "has at least one
-    record", not "has at least one column" - a record can flatten to zero columns and still
-    be a real row, unlike CSV/base's default column-count check)."""
-
     def validate(self, file_path: str) -> bool:
         if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
             return False
