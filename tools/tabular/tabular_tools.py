@@ -72,48 +72,21 @@ class TabularTools:
         return files
 
     def run_python(self, code: str, file_ids: list) -> dict:
-        """
-        Execute Python code in an isolated sandbox. Pass file ids to be used.
+        """Execute Python code in an isolated sandbox. Pass every assigned file_id you need.
 
-        Use table name for accessing the dataframe.
+        Write ONE complete script that does the whole task (query, transform, compute) - do not
+        split the task across multiple run_python calls to explore step by step. Only call this
+        again if the actual output/error from this call forces a change you couldn't predict.
 
-        Write only executable Python code.
+        Already defined in the global namespace - never import or redefine them:
+        - dfs: {table_name: DataFrame} for every assigned file
+        - describe(df): summary of a DataFrame
+        - preview(df): small preview of a DataFrame
+        - sql(query): runs SQL, returns a DataFrame
+        - save(df, name): persists a DataFrame, returns its file_id
 
-        The execution environment already provides these globals.
-        The following variables and functions are ALREADY DEFINED in the global namespace:
-
-        Variables:
-        - dfs
-
-       Functions:
-        - describe(df)
-          Returns a summary of a DataFrame.
-
-        - preview(df)
-          Returns a preview of a DataFrame.
-
-        - sql(query)
-        Executes a SQL query and returns a pandas DataFrame.
-
-        - save(df, name)
-        Saves a DataFrame and returns its file_id.
-
-        Never import them.
-        Never redefine them.
-        Never write `from ... import ...` or `import ... as ...`.
-
-        Use them directly.
-
-        Persist reusable outputs with save().
-
-        AVAILABLE LIBRARIES - this sandbox only has these installed, nothing else:
-        - pandas (as `pd`) - numpy comes along with it as pandas' own dependency, so basic
-          numpy usage generally works, but it is not a supported/guaranteed part of this
-          environment - prefer pandas/DuckDB SQL over numpy where you have a choice.
-        - duckdb (as `duckdb`, wrapped by sql() above - you don't need to import or call it directly)
-
-        Do NOT import any library or module, only use the given functions.
-        """
+        Only pandas (`pd`) and duckdb are installed - no matplotlib, sklearn, or other
+        third-party packages. Do not import anything; use the given functions directly."""
         if self._sandbox is None:
             raise RuntimeError("no storage configured for this agent, cannot run the sandbox")
         for file_id in file_ids:
