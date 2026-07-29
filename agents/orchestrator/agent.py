@@ -73,7 +73,7 @@ class InvestigationCancelled(Exception):
 class OrchestratorAgent:
     def __init__(
         self, catalog, vector_store=None, reranker=None, memory=None, storage=None,
-        reports_dir: str = "data/reports", investigation_id: str = "default", sandbox_manager=None,
+        reports_dir: str = "data/reports", chat_id: str = "default", sandbox_manager=None,
         result_collector: FinalResultCollector = None,
     ):
         self.logger = get_agent_logger("orchestrator_agent")
@@ -81,9 +81,12 @@ class OrchestratorAgent:
         fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
         client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
 
+        # chat_id (not investigation_id) - the sandbox this eventually reaches, via
+        # OrchestratorTools.invoke_tabular_agent -> TabularAgent -> TabularTools, is now scoped
+        # and kept warm per CHAT, not per investigation/turn (see sandbox/sandbox_manager.py).
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
-            reports_dir=reports_dir, investigation_id=investigation_id, sandbox_manager=sandbox_manager,
+            reports_dir=reports_dir, chat_id=chat_id, sandbox_manager=sandbox_manager,
             result_collector=result_collector or FinalResultCollector(),
         )
         self.model_client = client

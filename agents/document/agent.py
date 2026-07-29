@@ -5,7 +5,7 @@ from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
 from agents.document.config import get_model_config, get_system_message
-from agents.events import make_tool_call_translator
+from agents.events import make_tool_event_translator, truncate
 from agents.logger import get_agent_logger, log_event
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
@@ -13,6 +13,56 @@ from tools.document.document_tools import DocumentTools
 from tools.orchestrator.models import DocumentFindings
 from vectordb.chroma_store import ChromaVectorStore
 from vectordb.reranker import DeepInfraReranker
+
+
+def _quote(text, limit: int = 90) -> str | None:
+    preview = truncate(text, limit)
+    return f'"{preview}"' if preview else None
+
+
+def _search_request_detail(args: dict) -> str | None:
+    return _quote(args.get("query"))
+
+
+def _chunk_result_detail(_args: dict, result) -> str | None:
+    """search_documents/search_within_file both return a list of ChunkResult - so "how many
+    chunks came back" plus a preview of the best match, straight off the actual retrieval."""
+    chunks = result if isinstance(result, list) else []
+    if not chunks:
+        return "No matching chunks found"
+    label = "chunk" if len(chunks) == 1 else "chunks"
+    top = chunks[0] if isinstance(chunks[0], dict) else {}
+    preview = _quote(top.get("text"), 140)
+    return f"Found {len(chunks)} {label}" + (f" — top match: {preview}" if preview else "")
+
+
+def _table_result_detail(_args: dict, result) -> str | None:
+    tables = result if isinstance(result, list) else []
+    if not tables:
+        return "No matching tables found"
+    label = "table" if len(tables) == 1 else "tables"
+    captions = [t.get("caption") for t in tables[:2] if isinstance(t, dict) and t.get("caption")]
+    suffix = f" ({', '.join(captions)})" if captions else ""
+    return f"Found {len(tables)} {label}{suffix}"
+
+
+def _verify_result_detail(_args: dict, result) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    verdict = "Supported" if result.get("supported") else "Not supported"
+    reasoning = truncate(result.get("reasoning"), 110)
+    return f"{verdict}" + (f" — {reasoning}" if reasoning else "")
+
+
+def _chunk_text_detail(_args: dict, result) -> str | None:
+    """get_chunk/get_surrounding_chunks - a preview of the text actually retrieved, so a "reading
+    document content" step shows what it read, not just that it read something."""
+    if isinstance(result, list):
+        texts = [r.get("text") for r in result if isinstance(r, dict) and r.get("text")]
+        return truncate(" / ".join(texts), 160) if texts else None
+    if isinstance(result, dict):
+        return _quote(result.get("text"), 140)
+    return None
 
 
 class DocumentAgent:
@@ -131,7 +181,29 @@ class DocumentAgent:
         "get_table": "Getting table metadata",
     }
 
-    _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))
+    # Per-tool extras layered on top of _FRIENDLY_TOOL_NAMES - see agents/events.py's
+    # make_tool_event_translator docstring. Anything not listed here still gets a generic
+    # truncated-result preview, so every tool call still produces SOME "here's what came back"
+    # event even for the ones below with no bespoke builder (get_file_overview,
+    # list_file_sections, compare_documents, search_for_contradictions, get_table).
+    _REQUEST_DETAIL = {
+        "search_documents": _search_request_detail,
+        "search_within_file": _search_request_detail,
+        "search_tables": _search_request_detail,
+    }
+    _RESULT_DETAIL = {
+        "search_documents": _chunk_result_detail,
+        "search_within_file": _chunk_result_detail,
+        "search_tables": _table_result_detail,
+        "list_tables": _table_result_detail,
+        "verify_chunk_supports_claim": _verify_result_detail,
+        "get_chunk": _chunk_text_detail,
+        "get_surrounding_chunks": _chunk_text_detail,
+    }
+
+    _translate_event = staticmethod(
+        make_tool_event_translator(_FRIENDLY_TOOL_NAMES, _REQUEST_DETAIL, _RESULT_DETAIL)
+    )
 
     @staticmethod
     def _extract_refs(transcript: list, key: str) -> list:

@@ -19,13 +19,13 @@ from tools.tabular.sandbox_executor import PythonSandbox, SandboxExecutionError
 class TabularTools:
     def __init__(
         self, assigned_files: list, storage=None, workspace_id: str = "default",
-        investigation_id: str = "default", sandbox_manager=None, reports_dir: str = "data/reports",
+        chat_id: str = "default", sandbox_manager=None, reports_dir: str = "data/reports",
     ):
         self.assigned_files = {f.file_id: f for f in assigned_files}
         self.con = connect()
         self.storage = storage
         self.workspace_id = workspace_id
-        self.investigation_id = investigation_id
+        self.chat_id = chat_id
         self.root_dir = getattr(storage, "root_dir", None)
         self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
         self.table_names = {}
@@ -34,8 +34,10 @@ class TabularTools:
                 self.con, file_ref.file_id, self.workspace_id, self.root_dir
             )
 
+        # session_id=self.chat_id - PythonSandbox/SandboxManager don't know or care that this is
+        # a "chat" specifically, they just key a warm container by whatever id they're given.
         self._sandbox = (
-            PythonSandbox(self.root_dir, investigation_id=self.investigation_id, manager=sandbox_manager)
+            PythonSandbox(self.root_dir, session_id=self.chat_id, manager=sandbox_manager)
             if self.root_dir else None
         )
         self.saved_artifacts: dict = {}

@@ -19,7 +19,11 @@ PARQUET_VOLUME_NAME = os.environ.get("PARQUET_VOLUME_NAME", "dataanalyzer_parque
 SANDBOX_SOCKET_VOLUME_NAME = os.environ.get("SANDBOX_SOCKET_VOLUME_NAME", "dataanalyzer_sandbox_sockets")
 SANDBOX_SOCKET_CONTAINER_MOUNT = "/shared"
 
-DEFAULT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_IDLE_TIMEOUT_SECONDS", "600"))
+# 5 minutes - a sandbox is now scoped and kept warm per CHAT (see get_or_create's session_id
+# param, and worker_service/tasks/investigation.py which passes chat_id as that id), not per
+# investigation/turn, so this is genuinely "how long can a chat sit idle before we give the
+# container back" rather than a single request's timeout budget.
+DEFAULT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_IDLE_TIMEOUT_SECONDS", "300"))
 DEFAULT_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("SANDBOX_HEALTH_TIMEOUT_SECONDS", "15"))
 DEFAULT_REAP_INTERVAL_SECONDS = int(os.environ.get("SANDBOX_REAP_INTERVAL_SECONDS", "60"))
 
@@ -29,10 +33,10 @@ class SandboxManagerError(RuntimeError):
 
 
 class _SandboxHandle:
-    __slots__ = ("investigation_id", "container", "client", "socket_path", "created_at", "last_used_at", "lock")
+    __slots__ = ("session_id", "container", "client", "socket_path", "created_at", "last_used_at", "lock")
 
-    def __init__(self, investigation_id: str, container, client: SandboxClient, socket_path: str):
-        self.investigation_id = investigation_id
+    def __init__(self, session_id: str, container, client: SandboxClient, socket_path: str):
+        self.session_id = session_id
         self.container = container
         self.client = client
         self.socket_path = socket_path
@@ -63,6 +67,13 @@ class SandboxManager:
         self.reap_interval_seconds = reap_interval_seconds
 
         self._sandboxes: dict[str, _SandboxHandle] = {}
+        # user_id -> the session_id (chat_id) that user's one persistent sandbox currently
+        # belongs to. Only used to enforce "one warm sandbox per user at a time" - see
+        # get_or_create's user_id param / _evict_other_sessions_for_user. Deliberately NOT
+        # reverse-cleaned when a session is reaped/released some other way (idle timeout, an
+        # unhealthy-container recreate): it just self-corrects the next time that user sends a
+        # message, and release() on an already-gone session_id is already a safe no-op.
+        self._active_session_by_user: dict[str, str] = {}
         self._global_lock = threading.Lock()
         self._client = None
 
@@ -100,47 +111,75 @@ class SandboxManager:
             self.client.images.build(path=_SANDBOX_DIR, tag=self.image, rm=True)
             logger.info("sandbox image built in %.3fs", time.perf_counter() - start)
 
-    def get_or_create(self, investigation_id: str) -> SandboxClient:
+    def get_or_create(self, session_id: str, user_id: str | None = None) -> SandboxClient:
+        """`session_id` is chat_id in practice (see module docstring at the top of this file) -
+        the sandbox persists warm across every message in that chat, not just within one
+        investigation/turn.
+
+        `user_id`, when given, enforces "one warm sandbox per user at a time": if this user's
+        previous message was in a DIFFERENT session_id (chat), that chat's sandbox is released
+        first. Pass user_id only from the ONE call site that represents "a user just started
+        interacting with this chat" (the pre-warm at the top of run_investigation) - internal
+        reuse calls (e.g. from execute()) should leave it None so they don't re-trigger eviction
+        mid-investigation."""
         try:
-            validate_segment(investigation_id, "investigation_id")
+            validate_segment(session_id, "session_id")
         except InvalidArtifactIdError as exc:
             raise SandboxManagerError(str(exc)) from exc
 
+        if user_id is not None:
+            self._evict_other_sessions_for_user(user_id, session_id)
+
         with self._global_lock:
-            handle = self._sandboxes.get(investigation_id)
+            handle = self._sandboxes.get(session_id)
 
             if handle is None:
                 logger.info(
-                    "sandbox missing: no cached sandbox for investigation=%s yet - creating one now "
-                    "(first run_python call, or an earlier pre-warm that hasn't landed yet - the "
-                    "lock this method holds means only ONE of those actually calls docker.run)",
-                    investigation_id,
+                    "sandbox missing: no cached sandbox for session=%s yet - creating one now "
+                    "(first run_python call in this chat, or an earlier pre-warm that hasn't "
+                    "landed yet - the lock this method holds means only ONE of those actually "
+                    "calls docker.run)",
+                    session_id,
                 )
-                handle = self._create_sandbox(investigation_id)
-                self._sandboxes[investigation_id] = handle
+                handle = self._create_sandbox(session_id)
+                self._sandboxes[session_id] = handle
                 return handle.client
 
             alive, reason = self._liveness(handle)
             if alive:
                 logger.info(
-                    "sandbox reuse: investigation=%s container=%s (age=%.0fs, idle=%.0fs)",
-                    investigation_id, handle.container.short_id,
+                    "sandbox reuse: session=%s container=%s (age=%.0fs, idle=%.0fs)",
+                    session_id, handle.container.short_id,
                     time.time() - handle.created_at, time.time() - handle.last_used_at,
                 )
                 handle.last_used_at = time.time()
                 return handle.client
 
             logger.warning(
-                "sandbox unhealthy: investigation=%s container=%s reason=%r (age=%.0fs) - "
+                "sandbox unhealthy: session=%s container=%s reason=%r (age=%.0fs) - "
                 "destroying and recreating",
-                investigation_id, handle.container.short_id, reason, time.time() - handle.created_at,
+                session_id, handle.container.short_id, reason, time.time() - handle.created_at,
             )
             self._destroy_handle(handle)
-            self._sandboxes.pop(investigation_id, None)
+            self._sandboxes.pop(session_id, None)
 
-            handle = self._create_sandbox(investigation_id)
-            self._sandboxes[investigation_id] = handle
+            handle = self._create_sandbox(session_id)
+            self._sandboxes[session_id] = handle
             return handle.client
+
+    def _evict_other_sessions_for_user(self, user_id: str, session_id: str) -> None:
+        with self._global_lock:
+            previous = self._active_session_by_user.get(user_id)
+            self._active_session_by_user[user_id] = session_id
+        if previous is not None and previous != session_id:
+            logger.info(
+                "sandbox eviction: user=%s switched from session=%s to session=%s - releasing "
+                "the previous session's sandbox",
+                user_id, previous, session_id,
+            )
+            # Outside the lock above - release() takes _global_lock itself, and it isn't
+            # reentrant.
+            self.release(previous)
 
     def _liveness(self, handle: _SandboxHandle) -> tuple[bool, str | None]:
         try:
@@ -151,11 +190,11 @@ class SandboxManager:
             return False, f"container status is {handle.container.status!r}, not 'running'"
         return True, None
 
-    def _create_sandbox(self, investigation_id: str) -> _SandboxHandle:
-        logger.info("sandbox creation: starting new container for investigation=%s", investigation_id)
+    def _create_sandbox(self, session_id: str) -> _SandboxHandle:
+        logger.info("sandbox creation: starting new container for session=%s", session_id)
         self.ensure_image()
 
-        socket_filename = f"{investigation_id}.sock"
+        socket_filename = f"{session_id}.sock"
         host_socket_path = os.path.join(self.socket_root, socket_filename)
         if os.path.exists(host_socket_path):
             logger.warning(
@@ -178,18 +217,18 @@ class SandboxManager:
                 PARQUET_VOLUME_NAME: {"bind": "/data/parquet", "mode": "rw"},
                 SANDBOX_SOCKET_VOLUME_NAME: {"bind": SANDBOX_SOCKET_CONTAINER_MOUNT, "mode": "rw"},
             },
-            environment={"SANDBOX_ID": investigation_id},
-            labels={"dataanalyzer.investigation_id": investigation_id},
+            environment={"SANDBOX_ID": session_id},
+            labels={"dataanalyzer.session_id": session_id},
         )
         create_s = time.perf_counter() - create_start
         logger.info(
-            "sandbox creation: container %s created+started for investigation=%s in %.3fs",
-            container.short_id, investigation_id, create_s,
+            "sandbox creation: container %s created+started for session=%s in %.3fs",
+            container.short_id, session_id, create_s,
         )
 
         client = SandboxClient(host_socket_path)
         try:
-            self._wait_for_health(client, container, investigation_id)
+            self._wait_for_health(client, container, session_id)
         except Exception:
             try:
                 container.remove(force=True)
@@ -197,9 +236,9 @@ class SandboxManager:
                 pass
             raise
 
-        return _SandboxHandle(investigation_id, container, client, host_socket_path)
+        return _SandboxHandle(session_id, container, client, host_socket_path)
 
-    def _wait_for_health(self, client: SandboxClient, container, investigation_id: str) -> None:
+    def _wait_for_health(self, client: SandboxClient, container, session_id: str) -> None:
         deadline = time.perf_counter() + self.health_timeout_seconds
         attempt = 0
         last_error = None
@@ -210,14 +249,14 @@ class SandboxManager:
                 if container.status != "running":
                     logs = container.logs(tail=50).decode("utf-8", errors="replace")
                     raise SandboxManagerError(
-                        f"sandbox container for investigation {investigation_id} exited before "
+                        f"sandbox container for session {session_id} exited before "
                         f"becoming healthy (status={container.status}): {logs}"
                     )
                 client.health(timeout=1.5)
                 logger.info(
-                    "UDS connection established: investigation=%s container=%s socket=%s "
+                    "UDS connection established: session=%s container=%s socket=%s "
                     "(after %d attempt(s), %.2fs)",
-                    investigation_id, container.short_id, client.socket_path,
+                    session_id, container.short_id, client.socket_path,
                     attempt, self.health_timeout_seconds - (deadline - time.perf_counter()),
                 )
                 return
@@ -228,16 +267,19 @@ class SandboxManager:
                 time.sleep(0.2)
 
         raise SandboxManagerError(
-            f"sandbox for investigation {investigation_id} did not become healthy within "
+            f"sandbox for session {session_id} did not become healthy within "
             f"{self.health_timeout_seconds}s ({attempt} attempt(s)): {last_error}"
         )
 
     def execute(
-        self, investigation_id: str, code: str, tables: dict, workspace_id: str,
+        self, session_id: str, code: str, tables: dict, workspace_id: str,
         timeout_seconds: float = None,
     ) -> dict:
-        client = self.get_or_create(investigation_id)
-        handle = self._sandboxes.get(investigation_id)
+        # No user_id here on purpose - this is a reuse/continuation of an already-pre-warmed
+        # session (or a same-turn first call), not a new "user started interacting" event, so it
+        # must not re-trigger the one-sandbox-per-user eviction (see get_or_create's docstring).
+        client = self.get_or_create(session_id)
+        handle = self._sandboxes.get(session_id)
         lock = handle.lock if handle is not None else threading.Lock()
 
         with lock:
@@ -246,28 +288,28 @@ class SandboxManager:
                 result = client.execute(code, tables, workspace_id, timeout_seconds=timeout_seconds)
             except SandboxClientError as exc:
                 logger.warning(
-                    "execution failed for investigation=%s: %s - destroying sandbox so the next "
+                    "execution failed for session=%s: %s - destroying sandbox so the next "
                     "call gets a fresh container instead of repeating the same failure",
-                    investigation_id, exc,
+                    session_id, exc,
                 )
-                self.release(investigation_id)
+                self.release(session_id)
                 return {"stdout": "", "saved": [], "error": str(exc)}
             finally:
                 if handle is not None:
                     handle.last_used_at = time.time()
             logger.info(
-                "execution time: investigation=%s completed in %.1fms",
-                investigation_id, (time.perf_counter() - t0) * 1000,
+                "execution time: session=%s completed in %.1fms",
+                session_id, (time.perf_counter() - t0) * 1000,
             )
             return result
 
-    def release(self, investigation_id: str) -> None:
+    def release(self, session_id: str) -> None:
         with self._global_lock:
-            handle = self._sandboxes.pop(investigation_id, None)
+            handle = self._sandboxes.pop(session_id, None)
         if handle is None:
-            logger.debug("release: no sandbox cached for investigation=%s (already gone or never created)", investigation_id)
+            logger.debug("release: no sandbox cached for session=%s (already gone or never created)", session_id)
             return
-        logger.info("investigation %s ended - releasing sandbox %s", investigation_id, handle.container.short_id)
+        logger.info("session %s ended/evicted/idled out - releasing sandbox %s", session_id, handle.container.short_id)
         self._destroy_handle(handle)
 
     def _destroy_handle(self, handle: _SandboxHandle) -> None:
@@ -277,8 +319,8 @@ class SandboxManager:
             pass
         try:
             handle.container.remove(force=True)
-            logger.info("sandbox cleanup: container %s removed (investigation=%s)",
-                        handle.container.short_id, handle.investigation_id)
+            logger.info("sandbox cleanup: container %s removed (session=%s)",
+                        handle.container.short_id, handle.session_id)
         except NotFound:
             pass
         except Exception:
@@ -299,23 +341,23 @@ class SandboxManager:
             now = time.time()
             with self._global_lock:
                 idle_ids = [
-                    inv_id for inv_id, h in self._sandboxes.items()
+                    session_id for session_id, h in self._sandboxes.items()
                     if now - h.last_used_at > self.idle_timeout_seconds
                 ]
-            for inv_id in idle_ids:
+            for session_id in idle_ids:
                 logger.info(
-                    "idle timeout: investigation=%s idle beyond %ds - reaping",
-                    inv_id, self.idle_timeout_seconds,
+                    "idle timeout: session=%s idle beyond %ds (no message in this chat) - reaping",
+                    session_id, self.idle_timeout_seconds,
                 )
-                self.release(inv_id)
+                self.release(session_id)
 
     def shutdown_all(self) -> None:
         logger.info("SandboxManager shutdown: releasing %d sandbox(es)", len(self._sandboxes))
         self._reaper_stop.set()
         with self._global_lock:
             ids = list(self._sandboxes.keys())
-        for inv_id in ids:
-            self.release(inv_id)
+        for session_id in ids:
+            self.release(session_id)
 
 
 _manager_lock = threading.Lock()

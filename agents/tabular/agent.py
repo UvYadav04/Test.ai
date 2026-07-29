@@ -6,7 +6,7 @@ import time
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core import CancellationToken
 
-from agents.events import make_tool_call_translator
+from agents.events import make_tool_event_translator, truncate, truncate_lines
 from agents.logger import get_agent_logger, log_event
 from agents.tabular.config import get_model_config, get_system_message
 from agents.timing import ToolCallTimer
@@ -16,16 +16,55 @@ from tools.orchestrator.models import TabularFindings
 from tools.tabular.tabular_tools import TabularTools
 
 
+def _run_python_request_detail(args: dict) -> str | None:
+    """Preview of the actual code about to run (a SQL string inside a sql(...) call, a pandas
+    transform, whatever the model wrote) - not just "Executing a Python script"."""
+    return truncate_lines(args.get("code"), max_lines=4, line_limit=140)
+
+
+def _run_python_result_detail(_args: dict, result) -> str | None:
+    """run_python returns {"stdout", "saved", "error", "timings"} (see
+    sandbox/execution_engine.py). stdout is whatever the model's own print()/describe()/preview()
+    calls produced - that IS the summary the model is about to reason over, so show a few lines of
+    it (truncate_lines caps both line count and per-line length, "..." on either)."""
+    if not isinstance(result, dict):
+        return None
+    if result.get("error"):
+        return f"Error: {truncate(result['error'], 150)}"
+    stdout_preview = truncate_lines(result.get("stdout"), max_lines=6, line_limit=180)
+    if stdout_preview:
+        return stdout_preview
+    saved = result.get("saved") or []
+    return f"Saved {len(saved)} artifact(s), no printed output" if saved else "Ran with no output"
+
+
+def _create_visualizations_result_detail(_args: dict, result) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    charts = result.get("charts") or []
+    errors = result.get("errors") or []
+    titles = ", ".join(truncate(c.get("title"), 40) or c.get("chart_type", "chart") for c in charts[:3] if isinstance(c, dict))
+    parts = []
+    if charts:
+        parts.append(f"{len(charts)} chart(s) generated" + (f" ({titles})" if titles else ""))
+    if errors:
+        parts.append(f"{len(errors)} failed")
+    return "; ".join(parts) if parts else "No charts generated"
+
+
 class TabularAgent:
     def __init__(
         self, assigned_files: list, storage=None, workspace_id: str = "default",
-        investigation_id: str = "default", sandbox_manager=None, direct_route: bool = False,
+        chat_id: str = "default", sandbox_manager=None, direct_route: bool = False,
         reports_dir: str = "data/reports",
     ):
         self.logger = get_agent_logger("tabular_agent")
+        # chat_id (not investigation_id) keys the underlying sandbox - it now persists warm for
+        # the whole chat (across turns), released only on chat switch or 5-minute idle, not torn
+        # down at the end of every single investigation. See sandbox/sandbox_manager.py.
         self.tools = TabularTools(
             assigned_files, storage=storage, workspace_id=workspace_id,
-            investigation_id=investigation_id, sandbox_manager=sandbox_manager,
+            chat_id=chat_id, sandbox_manager=sandbox_manager,
             reports_dir=reports_dir,
         )
         model_config = get_model_config()
@@ -151,7 +190,20 @@ class TabularAgent:
         "create_visualizations": "Generating visualizations",
     }
 
-    _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))
+    # See agents/events.py's make_tool_event_translator docstring - list_allowed_files has no
+    # bespoke builder here so it falls back to the generic "N result(s)" preview, which is
+    # already the right answer for a plain list return.
+    _REQUEST_DETAIL = {
+        "run_python": _run_python_request_detail,
+    }
+    _RESULT_DETAIL = {
+        "run_python": _run_python_result_detail,
+        "create_visualizations": _create_visualizations_result_detail,
+    }
+
+    _translate_event = staticmethod(
+        make_tool_event_translator(_FRIENDLY_TOOL_NAMES, _REQUEST_DETAIL, _RESULT_DETAIL)
+    )
 
     @staticmethod
     def _extract_refs(transcript: list, key: str) -> list:

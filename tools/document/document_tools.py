@@ -96,7 +96,14 @@ class DocumentTools:
         rerank_s = 0.0
         if self.reranker:
             rerank_start = time.perf_counter()
-            chunks = self.reranker.rank(query, chunks, top_k=top_k)
+            try:
+                chunks = self.reranker.rank(query, chunks, top_k=top_k)
+            except Exception:
+                logger.warning(
+                    "reranker failed, falling back to unreranked vector_store results "
+                    "(query=%r, %d chunks)", query, len(chunks), exc_info=True,
+                )
+                chunks = chunks[:top_k]
             rerank_s = time.perf_counter() - rerank_start
 
         logger.info(

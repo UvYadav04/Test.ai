@@ -14,14 +14,14 @@ class PythonSandbox:
     def __init__(
         self,
         root_dir: str,
-        investigation_id: str = "default",
+        session_id: str = "default",
         timeout_seconds: int = 30,
         mem_limit: str = "512m",
         nano_cpus: int = 1_000_000_000,
         manager=None,
     ):
         self.root_dir = root_dir
-        self.investigation_id = investigation_id
+        self.session_id = session_id
         self.timeout_seconds = timeout_seconds
         self._mem_limit = mem_limit
         self._nano_cpus = nano_cpus
@@ -44,12 +44,12 @@ class PythonSandbox:
             raise SandboxExecutionError(str(exc)) from exc
 
         logger.debug(
-            "sandbox run: investigation=%s workspace=%s tables=%d",
-            self.investigation_id, workspace_id, len(container_tables),
+            "sandbox run: session=%s workspace=%s tables=%d",
+            self.session_id, workspace_id, len(container_tables),
         )
         try:
             return self.manager.execute(
-                self.investigation_id, code, container_tables, workspace_id,
+                self.session_id, code, container_tables, workspace_id,
                 timeout_seconds=self.timeout_seconds,
             )
         except SandboxManagerError as exc:
