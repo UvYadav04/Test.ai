@@ -426,7 +426,7 @@ class TabularTools:
         }
 
     def sample_rows(self, file_id: str, n: int = 5) -> list:
-        """Return up to n example rows from a file, to check real values before writing a query."""
+        
         self._check_assigned(file_id)
         n = min(n, 50)
         table = self._table(file_id)
@@ -435,7 +435,7 @@ class TabularTools:
         return [dict(zip(columns, row)) for row in result.fetchall()]
 
     def find_join_candidates(self, file_ids: list) -> list:
-        """Suggest likely join keys across the given files by name match plus sampled value overlap."""
+        
         for file_id in file_ids:
             self._check_assigned(file_id)
 
@@ -619,7 +619,7 @@ class TabularTools:
         )
 
     def validate_result(self, result: QueryResult, expected_shape: Optional[dict] = None) -> ValidationReport:
-        """Sanity-check a query result: empty results, unexpected row counts, negative revenue-like values."""
+        
         warnings = []
 
         if result.row_count == 0:

@@ -36,9 +36,6 @@ def _configure_root() -> logging.Logger:
 
 
 def get_agent_logger(name: str) -> logging.Logger:
-    """Every agent's logger is a child of one shared "agent" logger, so all agent activity
-    (tabular, document, orchestrator, hypothesis, monitor, ...) lands in the single file at
-    logs/agents.log (plus console), instead of each agent owning its own separate log file."""
     _configure_root()
     logger = logging.getLogger(f"{_ROOT_NAME}.{name}")
     logger.propagate = True

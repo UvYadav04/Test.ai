@@ -1,5 +1,3 @@
-"""Ensures the repo root is importable as top-level packages (ingestion, vectordb)
-regardless of where pytest is invoked from."""
 import os
 import sys
 

@@ -27,7 +27,7 @@ _SAFE_SEGMENT_RE = re.compile(r"^[0-9a-zA-Z_-]+$")
 
 
 class InvalidArtifactIdError(ValueError):
-    """Raised instead of ever building a path from an unvalidated string."""
+    
 
 
 def validate_segment(value: str, label: str = "id") -> str:

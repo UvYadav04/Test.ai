@@ -124,7 +124,7 @@ class ExecutionEngine:
         saved = []
 
         def describe(df):
-            """Schema/shape only - column names, dtypes, row/col count, null counts. No row data."""
+            
             return {
                 "columns": [str(c) for c in df.columns],
                 "dtypes": {str(c): str(df[c].dtype) for c in df.columns},
@@ -133,12 +133,12 @@ class ExecutionEngine:
             }
 
         def preview(df, n=5):
-            """Up to n rows (hard-capped at 50) as a list of dicts - use instead of print(df)."""
+            
             n = max(1, min(int(n), 10))
             return json.loads(df.head(n).to_json(orient="records"))
 
         def sql(query):
-            """Run a DuckDB SQL query over the tables in `dfs`, registered under their table_name."""
+            
             return con.execute(query).df()
 
         def save(df, name="result"):

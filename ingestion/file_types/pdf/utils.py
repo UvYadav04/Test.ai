@@ -41,7 +41,7 @@ def _table_page(table) -> int:
 
 
 def _infer_caption(table, document, chunks: list, page: int) -> str:
-    """4-tier fallback: explicit docling caption -> nearby text snippet -> section title -> none."""
+    
     explicit = _explicit_caption(table, document)
     if explicit:
         return explicit

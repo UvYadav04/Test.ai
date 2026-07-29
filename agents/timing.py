@@ -1,15 +1,3 @@
-"""Measures how long each tool call took, by pairing a ToolCallRequestEvent with its matching
-ToolCallExecutionEvent in the same autogen event stream - see agents/tabular/agent.py,
-agents/document/agent.py, agents/orchestrator/agent.py's run() loops, which all follow the same
-`async for event in self.agent.run_stream(...)` shape and already call agents.logger.log_event
-on every event; ToolCallTimer.record is meant to be called right alongside that.
-
-Every provider client (llm_provider/providers/*.py) sets parallel_tool_calls=False, so within
-one agent's own loop, tool call requests and their executions are always strictly sequential -
-one open call at a time - which is what lets this track pending start times in a plain dict
-keyed by tool name instead of needing a real call-id (autogen's ToolCallRequestEvent/
-ToolCallExecutionEvent don't surface one - see the note in agents/events.py).
-"""
 import time
 
 

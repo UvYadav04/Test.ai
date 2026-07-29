@@ -141,10 +141,7 @@ class DocumentAgent:
 
     @staticmethod
     def _extract_refs(transcript: list, key: str) -> list:
-        """Pull real ref values straight out of tool results instead of trusting an LLM to
-        transcribe them - table_ref/chunk_id are already exact values a tool returned, so
-        re-deriving them via a second model call is both an extra round trip and a chance to
-        hallucinate or drop one."""
+
         text = "\n".join(transcript)
         pattern = rf"['\"]{re.escape(key)}['\"]\s*:\s*['\"]([^'\"]+)['\"]"
         refs = []

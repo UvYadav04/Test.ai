@@ -206,8 +206,12 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
             )
 
         start = time.monotonic()
-        generation = langfuse.start_generation(
+        # Langfuse v4 unified start_span/start_generation into start_observation(as_type=...).
+        # See https://langfuse.com/docs/observability/sdk/upgrade-path/python-v3-to-v4 -
+        # `as_type="generation"` is the direct replacement for the old start_generation() call.
+        generation = langfuse.start_observation(
             name=f"{self._provider_name}.create",
+            as_type="generation",
             model=self._model or self._provider_name,
             input=_serialize_messages(messages),
             metadata={"provider": self._provider_name, "tool_count": len(tools)},
