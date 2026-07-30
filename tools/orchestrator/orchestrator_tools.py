@@ -32,7 +32,7 @@ class OrchestratorTools:
     def __init__(
         self, catalog, state, vector_store=None, reranker=None, memory=None, storage=None,
         reports_dir: str = "data/reports", chat_id: str = "default", sandbox_manager=None,
-        result_collector: FinalResultCollector = None,
+        result_collector: FinalResultCollector = None, chart_capacity_checker=None,
     ):
         self.catalog = catalog
         self.state = state
@@ -43,6 +43,7 @@ class OrchestratorTools:
         # chat-scoped now, not investigation-scoped (sandbox/sandbox_manager.py).
         self.chat_id = chat_id
         self.sandbox_manager = sandbox_manager
+        self.chart_capacity_checker = chart_capacity_checker
         self._vector_store = vector_store
         self._reranker = reranker
         self.memory = memory or LongTermMemory()
@@ -168,7 +169,7 @@ class OrchestratorTools:
         agent = TabularAgent(
             tabular_files, storage=self.storage, workspace_id=self.workspace_id,
             chat_id=self.chat_id, sandbox_manager=self.sandbox_manager,
-            reports_dir=self.reports_dir,
+            reports_dir=self.reports_dir, chart_capacity_checker=self.chart_capacity_checker,
         )
 
         effective_objective = objective

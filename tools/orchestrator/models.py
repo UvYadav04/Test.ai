@@ -28,6 +28,11 @@ class TabularFindings:
     artifact_refs: list = field(default_factory=list)
     artifact_metadata: dict = field(default_factory=dict)
     charts: list = field(default_factory=list)
+    # Only populated when this agent was direct-routed (see agents/final_answer.py) - its
+    # DIRECT_SYSTEM_MESSAGE asks for these, its TOOL_SYSTEM_MESSAGE (used when the Orchestrator
+    # delegates to it) does not, since that summary gets reformatted into the Orchestrator's own
+    # final answer rather than shown to the user directly.
+    follow_up_questions: list = field(default_factory=list)
 
 
 @dataclass
@@ -35,6 +40,8 @@ class DocumentFindings:
     summary: str
     artifact_refs: list = field(default_factory=list)
     source_refs: list = field(default_factory=list)
+    # See TabularFindings.follow_up_questions above - same direct-route-only behavior.
+    follow_up_questions: list = field(default_factory=list)
 
 
 @dataclass
@@ -120,6 +127,10 @@ class OrchestratorResult:
     artifacts: list = field(default_factory=list)
     files_used: list = field(default_factory=list)
     open_questions: list = field(default_factory=list)
+    # See TabularFindings.follow_up_questions - populated either by OrchestratorAgent's own final
+    # answer (see agents/final_answer.py) or copied through from a direct-routed agent's findings
+    # (see worker_service/tasks/investigation.py's _run_tabular_direct/_run_document_direct).
+    follow_up_questions: list = field(default_factory=list)
 
     @property
     def artifact_refs(self) -> list:

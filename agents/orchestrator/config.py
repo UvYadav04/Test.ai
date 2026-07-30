@@ -1,3 +1,5 @@
+from agents.final_answer import FOLLOW_UP_INSTRUCTION
+from agents.no_internal_ids import NO_INTERNAL_IDS_INSTRUCTION
 from config import get_settings
 
 SYSTEM_MESSAGE = """
@@ -66,8 +68,9 @@ If you know your next step will require one of these tools, include its capabili
 Request capabilities only when needed. Tool descriptions specify the capability name to request.
 
 Once you have enough evidence, stop calling tools and reply in plain language with your answer,
-citing what you found and mentioning the path of any file you generated.
-"""
+citing what you found. Describe any chart/file/table you produced by its plain-language title or
+filename only, never by an id or path - see the instruction below.
+""" + NO_INTERNAL_IDS_INSTRUCTION + FOLLOW_UP_INSTRUCTION
 
 FORMAT_SYSTEM_MESSAGE = """You are given a user's objective, the accumulated Investigation State
 summary, and a transcript of tool calls/results from an orchestration run. You have no tools

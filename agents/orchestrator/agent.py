@@ -7,10 +7,12 @@ from typing import List
 from autogen_agentchat.agents import AssistantAgent
 from autogen_core.model_context import UnboundedChatCompletionContext
 
-from agents.events import make_tool_call_translator
+from agents.events import make_tool_event_translator
+from agents.final_answer import split_follow_up_questions
 from agents.logger import get_agent_logger, log_event
 from agents.orchestrator import capabilities
 from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
+from agents.thread_context import thread_context_brief
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
 from tools.orchestrator.models import FinalResultCollector, InvestigationState, OrchestratorResult
@@ -74,7 +76,7 @@ class OrchestratorAgent:
     def __init__(
         self, catalog, vector_store=None, reranker=None, memory=None, storage=None,
         reports_dir: str = "data/reports", chat_id: str = "default", sandbox_manager=None,
-        result_collector: FinalResultCollector = None,
+        result_collector: FinalResultCollector = None, chart_capacity_checker=None,
     ):
         self.logger = get_agent_logger("orchestrator_agent")
         model_config = get_model_config()
@@ -88,6 +90,7 @@ class OrchestratorAgent:
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
             reports_dir=reports_dir, chat_id=chat_id, sandbox_manager=sandbox_manager,
             result_collector=result_collector or FinalResultCollector(),
+            chart_capacity_checker=chart_capacity_checker,
         )
         self.model_client = client
 
@@ -119,7 +122,7 @@ class OrchestratorAgent:
             f"Objective: {objective}\n"
             f"Workspace: {workspace_id}\n"
             f"Constraints: {constraints}\n\n"
-            f"{self._thread_context_brief(thread_context)}\n\n"
+            f"{thread_context_brief(thread_context)}\n\n"
             f"{self._context_brief()}"
         )
         self.logger.info("objective sent to agent: %s", task)
@@ -190,42 +193,15 @@ class OrchestratorAgent:
 
         self.logger.info("orchestrator agent run took %.3fs", time.perf_counter() - run_start)
         collector = self.tools.result_collector
+        answer, follow_up_questions = split_follow_up_questions(final_text)
         return OrchestratorResult(
-            final_answer=final_text,
+            final_answer=answer,
             chart_paths=collector.chart_paths,
             artifacts=collector.artifacts,
             files_used=collector.files_used,
             open_questions=self.tools.state.open_questions,
+            follow_up_questions=follow_up_questions,
         )
-
-    def _thread_context_brief(self, thread_context: dict | None) -> str:
-        if not thread_context:
-            return "This is the first message in this chat - no earlier context."
-
-        lines = []
-
-        summary = thread_context.get("summary")
-        if summary:
-            lines.append(f"Summary of this chat so far: {summary}")
-
-        recent_turns = thread_context.get("recent_turns") or []
-        if recent_turns:
-            lines.append("Most recent turns in this chat (oldest first) - use these to resolve "
-                         "references like \"that file\", \"the same but by region\", or a "
-                         "correction to what you said before:")
-            for turn in recent_turns:
-                lines.append(f"- User: {turn.get('query', '')}")
-                lines.append(f"  You answered: {turn.get('response', '')}")
-
-        files_used = thread_context.get("files_used") or []
-        if files_used:
-            lines.append(f"file_ids already queried earlier in this chat: {files_used}")
-
-        files_created = thread_context.get("files_created") or []
-        if files_created:
-            lines.append(f"Artifacts already produced earlier in this chat: {files_created}")
-
-        return "\n".join(lines) if lines else "This is the first message in this chat - no earlier context."
 
     def _context_brief(self, max_files: int = 40, max_columns: int = 25) -> str:
         now = datetime.now(timezone.utc)
@@ -283,4 +259,4 @@ class OrchestratorAgent:
         "recall_user_info": "Recalling saved preferences",
     }
 
-    _translate_event = staticmethod(make_tool_call_translator(_FRIENDLY_TOOL_NAMES))
+    _translate_event = staticmethod(make_tool_event_translator(_FRIENDLY_TOOL_NAMES))

@@ -116,6 +116,7 @@ class ReportingTools:
                 "x_column": spec.x_column,
                 "y_column": spec.y_column,
                 "z_column": spec.z_column,
+                "bins": spec.bins,
             })
 
         manifest = {
@@ -137,9 +138,17 @@ class ReportingTools:
             return cls._timeline_section(dataframe, spec)
         if spec.chart_type in ("scatter3d", "surface"):
             return cls._chart3d_section(dataframe, spec)
+        if spec.chart_type == "pie":
+            return cls._pie_section(dataframe, spec)
+        if spec.chart_type == "histogram":
+            return cls._histogram_section(dataframe, spec)
+        if spec.chart_type == "box":
+            return cls._box_section(dataframe, spec)
+        if spec.chart_type == "heatmap":
+            return cls._heatmap_section(dataframe, spec)
         raise ValueError(
             f"unknown chart_type '{spec.chart_type}' - use one of: "
-            "bar, line, timeline, scatter3d, surface"
+            "bar, line, timeline, scatter3d, surface, pie, histogram, box, heatmap"
         )
 
     @staticmethod
@@ -320,11 +329,108 @@ class ReportingTools:
             "z": [cls._safe(v) for v in df[spec.z_column].tolist()],
         }
 
+    @classmethod
+    def _pie_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
+        if not (spec.label_column and spec.value_column):
+            raise ValueError("chart_type 'pie' requires label_column and value_column")
+        # Capped tighter than the bar/line head(50) - a pie with more than ~20 slices stops
+        # being readable regardless of how much data backs it.
+        rows = dataframe.head(20)
+        return {
+            "kind": "chartjs",
+            "chart_type": "pie",
+            "title": spec.title or cls._humanize(spec.file_id, "Pie Chart"),
+            "source": str(spec.file_id),
+            "row_count": len(dataframe),
+            "x_label": spec.label_column,
+            "y_label": spec.value_column,
+            "labels": rows[spec.label_column].astype(str).tolist(),
+            "datasets": [{
+                "label": spec.value_column,
+                "data": [cls._safe(v) for v in rows[spec.value_column].tolist()],
+            }],
+        }
+
+    @classmethod
+    def _histogram_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
+        if not spec.value_column:
+            raise ValueError("chart_type 'histogram' requires value_column")
+        df = dataframe.head(5000)
+        title = spec.title or cls._humanize(spec.file_id, "Histogram")
+        section = {
+            "kind": "plotly",
+            "plot_type": "histogram",
+            "title": title,
+            "source": str(spec.file_id),
+            "row_count": len(df),
+            "x_label": spec.value_column,
+            "y_label": "Count",
+            "bins": spec.bins,
+        }
+        if spec.series_column:
+            section["groups"] = [
+                {"name": str(key), "x": [cls._safe(v) for v in group[spec.value_column].tolist()]}
+                for key, group in df.groupby(spec.series_column)
+            ]
+        else:
+            section["x"] = [cls._safe(v) for v in df[spec.value_column].tolist()]
+        return section
+
+    @classmethod
+    def _box_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
+        if not spec.value_column:
+            raise ValueError(
+                "chart_type 'box' requires value_column (optionally label_column to group into "
+                "multiple boxes)"
+            )
+        df = dataframe.head(5000)
+        title = spec.title or cls._humanize(spec.file_id, "Box Plot")
+        section = {
+            "kind": "plotly",
+            "plot_type": "box",
+            "title": title,
+            "source": str(spec.file_id),
+            "row_count": len(df),
+            "x_label": spec.label_column,
+            "y_label": spec.value_column,
+        }
+        if spec.label_column:
+            section["groups"] = [
+                {"name": str(key), "y": [cls._safe(v) for v in group[spec.value_column].tolist()]}
+                for key, group in df.groupby(spec.label_column)
+            ]
+        else:
+            section["y"] = [cls._safe(v) for v in df[spec.value_column].tolist()]
+        return section
+
+    @classmethod
+    def _heatmap_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
+        if not (spec.x_column and spec.y_column and spec.z_column):
+            raise ValueError("chart_type 'heatmap' requires x_column, y_column, and z_column")
+        df = dataframe.head(20000)
+        pivot = df.pivot_table(
+            index=spec.y_column, columns=spec.x_column, values=spec.z_column, aggfunc="mean"
+        )
+        return {
+            "kind": "plotly",
+            "plot_type": "heatmap",
+            "title": spec.title or cls._humanize(spec.file_id, "Heatmap"),
+            "source": str(spec.file_id),
+            "row_count": len(df),
+            "x_label": spec.x_column,
+            "y_label": spec.y_column,
+            "z_label": spec.z_column,
+            "x": [str(c) for c in pivot.columns.tolist()],
+            "y": [str(i) for i in pivot.index.tolist()],
+            "z": [[cls._safe(v) for v in row] for row in pivot.values.tolist()],
+        }
+
     @staticmethod
     def _chip(chart_type: str) -> str:
         return {
             "bar": "Bar", "line": "Line", "timeline": "Timeline",
             "scatter3d": "3D Scatter", "surface": "3D Surface",
+            "pie": "Pie", "histogram": "Histogram", "box": "Box Plot", "heatmap": "Heatmap",
         }.get(chart_type, chart_type.title())
 
     @classmethod
@@ -455,6 +561,7 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
         multi = len(datasets) > 1
         datasets_json = json.dumps(datasets)
 
+        is_pie = chart_type in ("pie", "doughnut")
         dataset_styling = f"""
         opts.data.datasets.forEach(function(ds, i) {{
           const color = PALETTE[i % PALETTE.length];
@@ -464,6 +571,11 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
             ds.borderRadius = 6;
             ds.borderSkipped = false;
             ds.maxBarThickness = 46;
+          }} else if ({json.dumps(is_pie)}) {{
+            ds.backgroundColor = ds.data.map(function(_, j) {{ return PALETTE[j % PALETTE.length]; }});
+            ds.borderColor = "#FFFFFF";
+            ds.borderWidth = 2;
+            ds.hoverOffset = 8;
           }} else {{
             ds.borderColor = color;
             ds.backgroundColor = withAlpha(color, 0.12);
@@ -481,6 +593,14 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
         y_label = section.get("y_label")
         x_title = f'{{ display: true, text: {json.dumps(x_label)}, color: "#A39E92", font: {{ weight: "600" }} }}' if x_label else '{ display: false }'
         y_title = f'{{ display: true, text: {json.dumps(y_label)}, color: "#A39E92", font: {{ weight: "600" }} }}' if y_label else '{ display: false }'
+        # Pie/doughnut have no cartesian scales - Chart.js ignores the `scales` option for them,
+        # but the legend still needs to be on (it's the only thing labeling each slice) even
+        # though there's only ever one dataset (multi would otherwise hide it).
+        show_legend = multi or is_pie
+        scales_config = "{}" if is_pie else f"""{{
+        x: {{ title: {x_title}, grid: {{ display: false }}, ticks: {{ maxRotation: 40, minRotation: 0 }} }},
+        y: {{ title: {y_title}, grid: {{ color: "#EDEAE0" }}, beginAtZero: true }}
+      }}"""
 
         return f"""
 (function() {{
@@ -492,12 +612,9 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
       maintainAspectRatio: false,
       interaction: {{ mode: 'index', intersect: false }},
       plugins: {{
-        legend: {{ display: {json.dumps(multi)}, position: 'bottom' }},
+        legend: {{ display: {json.dumps(show_legend)}, position: 'bottom' }},
       }},
-      scales: {{
-        x: {{ title: {x_title}, grid: {{ display: false }}, ticks: {{ maxRotation: 40, minRotation: 0 }} }},
-        y: {{ title: {y_title}, grid: {{ color: "#EDEAE0" }}, beginAtZero: true }}
-      }}
+      scales: {scales_config}
     }}
   }};
   {dataset_styling}
@@ -507,39 +624,108 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
 
     @staticmethod
     def _plotly_script(plot_id: str, section: dict) -> str:
-        common_layout = {
+        plot_type = section["plot_type"]
+        base_layout = {
             "paper_bgcolor": "rgba(0,0,0,0)",
             "plot_bgcolor": "rgba(0,0,0,0)",
             "font": {"family": "-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif", "color": "#3D3929"},
+            # A 10px margin only works for the "scene" (3D) plots below, where axis titles/ticks
+            # are drawn INSIDE the 3D scene area. Regular 2D cartesian axes (heatmap/histogram/
+            # box) draw their tick labels and axis title OUTSIDE the plot area, in this margin -
+            # 10px clipped them almost entirely. cartesian_layout below overrides this with real
+            # space plus automargin so Plotly can grow it further if a label needs more room.
             "margin": {"l": 10, "r": 10, "b": 10, "t": 10},
-            "scene": {
-                "xaxis": {"title": section.get("x_label") or "X", "gridcolor": "#EDEAE0"},
-                "yaxis": {"title": section.get("y_label") or "Y", "gridcolor": "#EDEAE0"},
-                "zaxis": {"title": section.get("z_label") or "Z", "gridcolor": "#EDEAE0"},
-            },
+        }
+        cartesian_layout = {
+            **base_layout,
+            "margin": {"l": 56, "r": 24, "b": 52, "t": 24},
         }
         warm_colorscale = [
             [0.0, "#F5F4EE"], [0.25, "#E8C4A8"], [0.5, "#D9A566"],
             [0.75, "#CC785C"], [1.0, "#8B4A32"],
         ]
-        if section["plot_type"] == "surface":
-            trace = {
-                "type": "surface", "x": section["x"], "y": section["y"], "z": section["z"],
-                "colorscale": warm_colorscale, "showscale": False,
+
+        if plot_type in ("surface", "scatter3d"):
+            layout = {**base_layout, "scene": {
+                "xaxis": {"title": section.get("x_label") or "X", "gridcolor": "#EDEAE0"},
+                "yaxis": {"title": section.get("y_label") or "Y", "gridcolor": "#EDEAE0"},
+                "zaxis": {"title": section.get("z_label") or "Z", "gridcolor": "#EDEAE0"},
+            }}
+            if plot_type == "surface":
+                traces = [{
+                    "type": "surface", "x": section["x"], "y": section["y"], "z": section["z"],
+                    "colorscale": warm_colorscale, "showscale": False,
+                }]
+            else:
+                traces = [{
+                    "type": "scatter3d", "mode": "markers",
+                    "x": section["x"], "y": section["y"], "z": section["z"],
+                    "marker": {
+                        "size": 4, "color": section["z"], "colorscale": warm_colorscale,
+                        "opacity": 0.85, "showscale": False,
+                    },
+                }]
+
+        elif plot_type == "heatmap":
+            layout = {**cartesian_layout,
+                "xaxis": {"title": section.get("x_label") or "X", "gridcolor": "#EDEAE0", "automargin": True},
+                "yaxis": {"title": section.get("y_label") or "Y", "gridcolor": "#EDEAE0", "automargin": True},
             }
+            traces = [{
+                "type": "heatmap", "x": section["x"], "y": section["y"], "z": section["z"],
+                "colorscale": warm_colorscale,
+            }]
+
+        elif plot_type == "histogram":
+            groups = section.get("groups")
+            layout = {**cartesian_layout,
+                "xaxis": {"title": section.get("x_label") or "X", "gridcolor": "#EDEAE0", "automargin": True},
+                "yaxis": {"title": section.get("y_label") or "Count", "gridcolor": "#EDEAE0", "automargin": True},
+                "barmode": "overlay",
+                "showlegend": bool(groups),
+                "legend": {"orientation": "h", "y": -0.25},
+            }
+            if groups:
+                traces = []
+                for i, group in enumerate(groups):
+                    trace = {
+                        "type": "histogram", "x": group["x"], "name": group["name"], "opacity": 0.65,
+                        "marker": {"color": PALETTE[i % len(PALETTE)]},
+                    }
+                    if section.get("bins"):
+                        trace["nbinsx"] = section["bins"]
+                    traces.append(trace)
+            else:
+                trace = {"type": "histogram", "x": section["x"], "marker": {"color": PALETTE[0]}}
+                if section.get("bins"):
+                    trace["nbinsx"] = section["bins"]
+                traces = [trace]
+
+        elif plot_type == "box":
+            groups = section.get("groups")
+            layout = {**cartesian_layout,
+                "xaxis": {"title": section.get("x_label"), "gridcolor": "#EDEAE0", "automargin": True},
+                "yaxis": {"title": section.get("y_label") or "Y", "gridcolor": "#EDEAE0", "automargin": True},
+                "showlegend": False,
+            }
+            if groups:
+                traces = [
+                    {"type": "box", "y": group["y"], "name": group["name"], "marker": {"color": PALETTE[i % len(PALETTE)]}}
+                    for i, group in enumerate(groups)
+                ]
+            else:
+                traces = [{
+                    "type": "box", "y": section["y"], "marker": {"color": PALETTE[0]},
+                    "name": section.get("y_label") or "",
+                }]
+
         else:
-            trace = {
-                "type": "scatter3d", "mode": "markers",
-                "x": section["x"], "y": section["y"], "z": section["z"],
-                "marker": {
-                    "size": 4, "color": section["z"], "colorscale": warm_colorscale,
-                    "opacity": 0.85, "showscale": False,
-                },
-            }
+            raise ValueError(f"unsupported plotly plot_type '{plot_type}'")
+
         config = {"displaylogo": False, "responsive": True}
         return (
-            f"Plotly.newPlot({json.dumps(plot_id)}, [{json.dumps(trace)}], "
-            f"{json.dumps(common_layout)}, {json.dumps(config)});"
+            f"Plotly.newPlot({json.dumps(plot_id)}, {json.dumps(traces)}, "
+            f"{json.dumps(layout)}, {json.dumps(config)});"
         )
 
     @staticmethod

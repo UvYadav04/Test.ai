@@ -5,7 +5,9 @@ from typing import Literal, Optional
 @dataclass
 class ChartSpec:
     file_id: str
-    chart_type: Literal["bar", "line", "timeline", "scatter3d", "surface"] = "bar"
+    chart_type: Literal[
+        "bar", "line", "timeline", "scatter3d", "surface", "pie", "histogram", "box", "heatmap",
+    ] = "bar"
     title: Optional[str] = None
     name: Optional[str] = None
     label_column: Optional[str] = None
@@ -16,3 +18,5 @@ class ChartSpec:
     x_column: Optional[str] = None
     y_column: Optional[str] = None
     z_column: Optional[str] = None
+    # histogram only - number of buckets to bin value_column into. None lets Plotly auto-bin.
+    bins: Optional[int] = None

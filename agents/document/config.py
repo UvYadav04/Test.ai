@@ -1,3 +1,5 @@
+from agents.final_answer import FOLLOW_UP_INSTRUCTION
+from agents.no_internal_ids import NO_INTERNAL_IDS_INSTRUCTION
 from config import get_settings
 
 _SHARED_RULES = """
@@ -22,10 +24,10 @@ Your task message already includes deterministic metadata (filename, pages, chun
 section headings) for every assigned file - don't spend a tool call re-deriving it via
 get_file_overview/list_file_sections/list_tables; start on the actual objective instead.
 {_SHARED_RULES}
-Finish with ONE plain-language reply: state the answer and cite the relevant chunk_id inline for
-every factual claim (e.g. "Revenue grew 12% [chunk_id: abc123]"); mention any relevant table_ref.
-No JSON, no tool narration - the orchestrator reformats this into the final answer.
-"""
+Finish with ONE plain-language reply: state the answer directly, backed only by evidence a tool
+actually returned. No JSON, no tool narration - the orchestrator reformats this into the final
+answer.
+""" + NO_INTERNAL_IDS_INSTRUCTION
 
 DIRECT_SYSTEM_MESSAGE = f"""
 You are the Document Agent, answering a document question directly - there is no orchestrator
@@ -36,9 +38,9 @@ metadata already given plus search_documents/get_file_overview to confirm which 
 actually relevant before answering, rather than assuming.
 {_SHARED_RULES}
 Finish with ONE complete, natural answer - this is shown to the user exactly as written. State
-the answer and cite the relevant chunk_id inline for every factual claim; mention any relevant
-table_ref. No JSON, no tool narration.
-"""
+the answer directly, backed only by evidence a tool actually returned. No JSON, no tool
+narration.
+""" + NO_INTERNAL_IDS_INSTRUCTION + FOLLOW_UP_INSTRUCTION
 
 
 def get_system_message(direct_route: bool = False) -> str:

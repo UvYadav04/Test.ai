@@ -20,6 +20,7 @@ class TabularTools:
     def __init__(
         self, assigned_files: list, storage=None, workspace_id: str = "default",
         chat_id: str = "default", sandbox_manager=None, reports_dir: str = "data/reports",
+        chart_capacity_checker=None,
     ):
         self.assigned_files = {f.file_id: f for f in assigned_files}
         self.con = connect()
@@ -42,6 +43,12 @@ class TabularTools:
         )
         self.saved_artifacts: dict = {}
         self.charts_created: list = []
+        # Optional async, no-arg callable returning whether this user can still create a chart -
+        # injected from worker_service (the only layer that knows about shared.usage/Mongo/admin
+        # emails; analyzerEngine deliberately never imports shared - see create_visualizations
+        # below for why this is checked FIRST, before any chart is actually generated). None
+        # means "no cap enforced here" (e.g. tests, or callers that don't care).
+        self.chart_capacity_checker = chart_capacity_checker
 
     def _check_assigned(self, file_id: str) -> None:
         if file_id not in self.assigned_files:
@@ -105,55 +112,78 @@ class TabularTools:
                 self.saved_artifacts[file_id] = entry
         return result
 
-    _VALID_CHART_TYPES = {"bar", "line", "timeline", "scatter3d", "surface"}
+    _VALID_CHART_TYPES = {
+        "bar", "line", "timeline", "scatter3d", "surface", "pie", "histogram", "box", "heatmap",
+    }
 
-    def create_visualizations(self, visualizations: list[dict]) -> dict:
-        """Validate, generate, and save charts for one or more artifacts you already save()'d -
-        in a SINGLE call. Pass every chart the objective needs at once (one dict per chart in
-        `visualizations`) rather than calling this more than once per run; if you already know
-        every chart you need before calling this, save every artifact first, then make one
-        create_visualizations call with all of them together.
+    async def create_visualizations(self, visualizations: list[dict]) -> dict:
+        """Generate charts for one or more previously saved artifacts.
 
-        You are the only one who knows how each artifact should be charted: you read the
-        objective, planned the query, and interpreted the result - nobody downstream ever sees
-        the raw data, so if you don't say which column is the category and which is the metric,
-        nobody else can work it out correctly afterward.
+        Call this ONCE per run after all required save() calls. Pass every desired chart
+        in a single `visualizations` list.
 
-        Each item in `visualizations` is a dict with:
-        - file_id (required): a real file_id this session's save() already returned - call
-          list_allowed_files/run_python first, never a guessed or invented id.
-        - chart_type (required): one of "bar", "line", "timeline", "scatter3d", "surface".
-          - "bar"/"line": label_column + value_columns for a single grouping column with one or
-            more numeric series; or label_column + series_column + value_column when the result
-            has TWO grouping columns and one metric (e.g. columns Region, Gender, AverageAge ->
-            label_column="Region", series_column="Gender", value_column="AverageAge").
-          - "timeline": time_column is required, plus either value_columns (wide: one series per
-            column) or series_column + value_column (long/tidy: one series per distinct value in
-            series_column).
-          - "scatter3d"/"surface": x_column, y_column, and z_column are all required.
-        - title (required): a short, specific chart title (e.g. "Average Age per Region for
-          Exited Customers") - this is what gets shown verbatim, not the artifact's file_id.
-        - label_column/value_columns/time_column/series_column/value_column/x_column/y_column/
-          z_column (optional, chart_type-dependent, see above): must be EXACT column names from
-          that artifact (as returned by save() / seen in this session's run_python results) -
-          never a renamed, abbreviated, or invented name.
+        Each visualization must include:
+        - file_id: file_id returned by save() in this session.
+        - chart_type: "bar", "line", "timeline", "scatter3d", "surface", "pie", "histogram",
+          "box", or "heatmap".
+        - title: Chart title.
+        - Required column mappings based on chart_type:
+            * bar/line:
+                - label_column + value_columns (wide format), OR
+                - label_column + series_column + value_column (long format)
+            * timeline:
+                - time_column + value_columns, OR
+                - time_column + series_column + value_column
+            * scatter3d/surface:
+                - x_column, y_column, z_column
+            * pie:
+                - label_column (category/slice) + value_column (single numeric)
+            * histogram:
+                - value_column (single numeric column to bin/count)
+                - optional series_column to overlay one histogram per group
+                - optional bins (int) to control bucket count - auto if omitted
+            * box:
+                - value_column (single numeric column)
+                - optional label_column to draw one box per category instead of a single box
+            * heatmap:
+                - x_column, y_column, z_column (z is averaged per x/y cell)
 
-        Every visualization request is validated and generated INDEPENDENTLY - one bad request
-        (an unsupported chart_type, a file_id never save()'d this session, a wrong column name, a
-        missing required column for that chart_type) returns an error for THAT chart only and
-        never prevents the others in the same call from being generated. This never raises, so a
-        mistake in one entry doesn't end your run early.
+        Column names must exactly match those in the saved artifact.
 
-        Returns {"status": "success"|"partial_error"|"error", "charts": [...], "errors": [...]}.
-        Each successful entry in "charts" has artifact_file_id, chart_id, chart_type, title, and
-        location (the chart's saved file) - it's already generated and will be attached to the
-        final answer automatically, you don't need to do anything else with it, just mention it
-        in your summary. Each entry in "errors" has the request's index, requested_file_id (if
-        available), and an "error" message explaining exactly what to fix."""
+        Each chart is validated independently. Invalid requests fail individually without
+        affecting the others.
+
+        Returns:
+        {
+            "status": "success" | "partial_error" | "error",
+            "charts": [...],   # Successfully generated charts
+            "errors": [...]    # Validation/generation failures
+        }
+
+        If the account's chart limit has been reached, no charts are generated. Do not
+        retry; inform the user that the chart limit has been reached.
+        """
         if self.reporting is None:
             return {
                 "status": "error", "charts": [],
                 "errors": [{"error": "no storage configured for this agent, cannot generate charts"}],
+            }
+
+        # Checked FIRST, before generating a single chart - rendering one costs real work
+        # (sandboxed rendering + disk I/O) that used to happen even when the result would later
+        # get silently dropped at persist time (worker_service/tasks/investigation.py's
+        # _persist_artifacts checked the cap only after the file already existed). Admins are
+        # exempt (see shared/usage.py's has_chart_capacity(email=...)) - this checker is already
+        # bound to the right user/email by whoever constructed this agent.
+        if self.chart_capacity_checker is not None and not await self.chart_capacity_checker():
+            return {
+                "status": "error", "charts": [],
+                "errors": [{
+                    "error": (
+                        "Chart limit reached for this account - no more charts can be created. "
+                        "Do not attempt to generate a chart; tell the user the limit has been hit."
+                    ),
+                }],
             }
 
         charts = []
@@ -219,6 +249,7 @@ class TabularTools:
         x_column = raw.get("x_column")
         y_column = raw.get("y_column")
         z_column = raw.get("z_column")
+        bins = raw.get("bins")
 
         if not file_id:
             return None, "file_id is required"
@@ -266,7 +297,7 @@ class TabularTools:
             ("label_column", label_column), ("value_columns", value_columns),
             ("time_column", time_column), ("series_column", series_column),
             ("value_column", value_column), ("x_column", x_column),
-            ("y_column", y_column), ("z_column", z_column),
+            ("y_column", y_column), ("z_column", z_column), ("bins", bins),
         ):
             if val:
                 spec_kwargs[key] = val
@@ -305,6 +336,31 @@ class TabularTools:
                 return (
                     f"chart_type={chart_type!r} requires x_column, y_column, AND z_column all "
                     f"set - got x_column={x_column!r}, y_column={y_column!r}, z_column={z_column!r}."
+                )
+        elif chart_type == "pie":
+            if not (label_column and value_column):
+                return (
+                    "chart_type='pie' requires label_column (the slice category) and "
+                    f"value_column (a single numeric column) - got label_column={label_column!r}, "
+                    f"value_column={value_column!r}."
+                )
+        elif chart_type == "histogram":
+            if not value_column:
+                return (
+                    "chart_type='histogram' requires value_column (the numeric column to bin) - "
+                    "optionally series_column to overlay one histogram per group."
+                )
+        elif chart_type == "box":
+            if not value_column:
+                return (
+                    "chart_type='box' requires value_column (the numeric column to summarize) - "
+                    "optionally label_column to draw one box per category."
+                )
+        elif chart_type == "heatmap":
+            if not (x_column and y_column and z_column):
+                return (
+                    "chart_type='heatmap' requires x_column, y_column, AND z_column all set - got "
+                    f"x_column={x_column!r}, y_column={y_column!r}, z_column={z_column!r}."
                 )
         return None
 
