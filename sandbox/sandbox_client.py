@@ -16,7 +16,7 @@ def _quote_socket_path(socket_path: str) -> str:
 
 
 class SandboxClient:
-    def __init__(self, socket_path: str, timeout_seconds: float = 30.0):
+    def     __init__(self, socket_path: str, timeout_seconds: float = 30.0):
         self.socket_path = socket_path
         self.timeout_seconds = timeout_seconds
         self._session = requests_unixsocket.Session()

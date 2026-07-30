@@ -67,12 +67,6 @@ class SandboxManager:
         self.reap_interval_seconds = reap_interval_seconds
 
         self._sandboxes: dict[str, _SandboxHandle] = {}
-        # user_id -> the session_id (chat_id) that user's one persistent sandbox currently
-        # belongs to. Only used to enforce "one warm sandbox per user at a time" - see
-        # get_or_create's user_id param / _evict_other_sessions_for_user. Deliberately NOT
-        # reverse-cleaned when a session is reaped/released some other way (idle timeout, an
-        # unhealthy-container recreate): it just self-corrects the next time that user sends a
-        # message, and release() on an already-gone session_id is already a safe no-op.
         self._active_session_by_user: dict[str, str] = {}
         self._global_lock = threading.Lock()
         self._client = None
@@ -177,8 +171,6 @@ class SandboxManager:
                 "the previous session's sandbox",
                 user_id, previous, session_id,
             )
-            # Outside the lock above - release() takes _global_lock itself, and it isn't
-            # reentrant.
             self.release(previous)
 
     def _liveness(self, handle: _SandboxHandle) -> tuple[bool, str | None]:
@@ -275,9 +267,6 @@ class SandboxManager:
         self, session_id: str, code: str, tables: dict, workspace_id: str,
         timeout_seconds: float = None,
     ) -> dict:
-        # No user_id here on purpose - this is a reuse/continuation of an already-pre-warmed
-        # session (or a same-turn first call), not a new "user started interacting" event, so it
-        # must not re-trigger the one-sandbox-per-user eviction (see get_or_create's docstring).
         client = self.get_or_create(session_id)
         handle = self._sandboxes.get(session_id)
         lock = handle.lock if handle is not None else threading.Lock()
