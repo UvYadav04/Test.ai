@@ -18,5 +18,4 @@ class ChartSpec:
     x_column: Optional[str] = None
     y_column: Optional[str] = None
     z_column: Optional[str] = None
-    # histogram only - number of buckets to bin value_column into. None lets Plotly auto-bin.
     bins: Optional[int] = None

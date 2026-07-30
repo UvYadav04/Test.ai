@@ -35,19 +35,13 @@ class TabularTools:
                 self.con, file_ref.file_id, self.workspace_id, self.root_dir
             )
 
-        # session_id=self.chat_id - PythonSandbox/SandboxManager don't know or care that this is
-        # a "chat" specifically, they just key a warm container by whatever id they're given.
         self._sandbox = (
             PythonSandbox(self.root_dir, session_id=self.chat_id, manager=sandbox_manager)
             if self.root_dir else None
         )
         self.saved_artifacts: dict = {}
         self.charts_created: list = []
-        # Optional async, no-arg callable returning whether this user can still create a chart -
-        # injected from worker_service (the only layer that knows about shared.usage/Mongo/admin
-        # emails; analyzerEngine deliberately never imports shared - see create_visualizations
-        # below for why this is checked FIRST, before any chart is actually generated). None
-        # means "no cap enforced here" (e.g. tests, or callers that don't care).
+       
         self.chart_capacity_checker = chart_capacity_checker
 
     def _check_assigned(self, file_id: str) -> None:
@@ -168,13 +162,6 @@ class TabularTools:
                 "status": "error", "charts": [],
                 "errors": [{"error": "no storage configured for this agent, cannot generate charts"}],
             }
-
-        # Checked FIRST, before generating a single chart - rendering one costs real work
-        # (sandboxed rendering + disk I/O) that used to happen even when the result would later
-        # get silently dropped at persist time (worker_service/tasks/investigation.py's
-        # _persist_artifacts checked the cap only after the file already existed). Admins are
-        # exempt (see shared/usage.py's has_chart_capacity(email=...)) - this checker is already
-        # bound to the right user/email by whoever constructed this agent.
         if self.chart_capacity_checker is not None and not await self.chart_capacity_checker():
             return {
                 "status": "error", "charts": [],

@@ -333,8 +333,6 @@ class ReportingTools:
     def _pie_section(cls, dataframe: pd.DataFrame, spec: ChartSpec) -> dict:
         if not (spec.label_column and spec.value_column):
             raise ValueError("chart_type 'pie' requires label_column and value_column")
-        # Capped tighter than the bar/line head(50) - a pie with more than ~20 slices stops
-        # being readable regardless of how much data backs it.
         rows = dataframe.head(20)
         return {
             "kind": "chartjs",
@@ -629,11 +627,6 @@ Chart.defaults.plugins.tooltip.titleFont = {{ weight: '600' }};
             "paper_bgcolor": "rgba(0,0,0,0)",
             "plot_bgcolor": "rgba(0,0,0,0)",
             "font": {"family": "-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif", "color": "#3D3929"},
-            # A 10px margin only works for the "scene" (3D) plots below, where axis titles/ticks
-            # are drawn INSIDE the 3D scene area. Regular 2D cartesian axes (heatmap/histogram/
-            # box) draw their tick labels and axis title OUTSIDE the plot area, in this margin -
-            # 10px clipped them almost entirely. cartesian_layout below overrides this with real
-            # space plus automargin so Plotly can grow it further if a label needs more room.
             "margin": {"l": 10, "r": 10, "b": 10, "t": 10},
         }
         cartesian_layout = {

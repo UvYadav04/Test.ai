@@ -21,9 +21,6 @@ class BaseReranker(ABC):
 class CrossEncoderReranker(BaseReranker):
     def __init__(self, model_name: str = None, timeout: float = 30.0):
         settings = get_settings()
-        # `or DEFAULT_MODEL` on top of .get()'s own default - Settings.get() only falls back to
-        # its `default` arg when the key is entirely ABSENT from .env, not when it's present but
-        # blank (RERANKER_MODEL=), which .get() happily returns as "" otherwise.
         self.model_name = model_name or settings.get("RERANKER_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL
         self.api_token = settings.get("HF_API_TOKEN")
         if not self.api_token:
