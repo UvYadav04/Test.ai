@@ -1,4 +1,4 @@
-ROM python:3.11-slim
+FROM python:3.11-slim
 
 RUN pip install --no-cache-dir \
     pandas==2.2.2 pyarrow==16.1.0 duckdb==1.0.0 \
