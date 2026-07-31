@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Optional
 
 from sandbox.path_resolver import new_artifact_id
@@ -14,6 +16,8 @@ from tools.tabular.models import (
     ValidationReport,
 )
 from tools.tabular.sandbox_executor import PythonSandbox, SandboxExecutionError
+
+logger = logging.getLogger("tools.tabular")
 
 
 class TabularTools:
@@ -95,10 +99,32 @@ class TabularTools:
         for file_id in file_ids:
             self._check_assigned(file_id)
         tables = {self._table(fid): fid for fid in file_ids}
+
+        logger.info(
+            "run_python: chat=%s workspace=%s file_ids=%s code_chars=%d",
+            self.chat_id, self.workspace_id, file_ids, len(code),
+        )
+        t0 = time.perf_counter()
         try:
             result = self._sandbox.run(code, tables, self.workspace_id)
         except SandboxExecutionError as exc:
+            logger.warning(
+                "run_python: chat=%s raised after %.1fms: %s",
+                self.chat_id, (time.perf_counter() - t0) * 1000, exc,
+            )
             return {"stdout": "", "saved": [], "error": str(exc)}
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        if result.get("error"):
+            logger.warning(
+                "run_python: chat=%s completed with error in %.1fms: %s",
+                self.chat_id, elapsed_ms, result["error"],
+            )
+        else:
+            logger.info(
+                "run_python: chat=%s completed in %.1fms (saved=%d artifact(s))",
+                self.chat_id, elapsed_ms, len(result.get("saved") or []),
+            )
 
         for entry in result.get("saved") or []:
             file_id = entry.get("file_id")

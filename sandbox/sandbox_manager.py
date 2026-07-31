@@ -55,6 +55,8 @@ class _SandboxHandle:
 
 
 class SandboxManager:
+    MAX_EXECUTE_ATTEMPTS = 2
+
     def __init__(
         self,
         socket_root: str,
@@ -106,15 +108,19 @@ class SandboxManager:
 
     def ensure_image(self) -> None:
         start = time.perf_counter()
+        logger.info("ensure_image: checking Docker daemon for image %s", self.image)
         try:
             self.client.images.get(self.image)
-            logger.info("sandbox image exists")
+            logger.info(
+                "ensure_image: image %s already exists (checked in %.1fms) - reusing it",
+                self.image, (time.perf_counter() - start) * 1000,
+            )
             return
         except ImageNotFound:
-            logger.info("sandbox image not found")
+            logger.info("ensure_image: image %s not found - building it now", self.image)
 
         try:
-            logger.info("building image from %s", _SANDBOX_DIR)
+            logger.info("ensure_image: building image %s from build context %s", self.image, _SANDBOX_DIR)
             image, logs = self.client.images.build(
                 path=_SANDBOX_DIR,
                 tag=self.image,
@@ -125,9 +131,12 @@ class SandboxManager:
                     logger.info(chunk["stream"].rstrip())
                 elif "error" in chunk:
                     logger.error(chunk["error"])
-            logger.info("image built in %.2fs", time.perf_counter() - start)
-        except Exception as e:
-            logger.exception("Failed to build sandbox image : ",e)
+            logger.info(
+                "ensure_image: image %s built successfully in %.2fs (id=%s)",
+                self.image, time.perf_counter() - start, getattr(image, "short_id", "?"),
+            )
+        except Exception:
+            logger.exception("ensure_image: failed to build sandbox image %s", self.image)
             raise
 
     def get_or_create(self, session_id: str, user_id: str | None = None) -> SandboxClient:
@@ -203,7 +212,10 @@ class SandboxManager:
 
         socket_filename = f"{session_id}.sock"
         host_socket_path = os.path.join(self.socket_root, socket_filename)
-        logger.info("Socket path: %s", host_socket_path)
+        logger.info(
+            "sandbox creation: session=%s host socket path=%s (self.socket_root=%s)",
+            session_id, host_socket_path, self.socket_root,
+        )
         if os.path.exists(host_socket_path):
             logger.warning(
                 "sandbox creation: removing stale socket file %s before starting new container",
@@ -214,6 +226,19 @@ class SandboxManager:
             except OSError:
                 logger.exception("failed to remove stale socket file %s", host_socket_path)
 
+        volumes = {
+            PARQUET_VOLUME_NAME: {"bind": "/data/parquet", "mode": "rw"},
+            SANDBOX_SOCKET_VOLUME_NAME: {"bind": SANDBOX_SOCKET_CONTAINER_MOUNT, "mode": "rw"},
+        }
+        environment = {
+            "SANDBOX_ID": session_id,
+            "SANDBOX_SOCKET_ROOT": SANDBOX_SOCKET_CONTAINER_MOUNT,
+        }
+        logger.info(
+            "sandbox creation: session=%s image=%s volumes=%s environment=%s",
+            session_id, self.image, volumes, environment,
+        )
+
         create_start = time.perf_counter()
         container = self.client.containers.run(
             self.image,
@@ -221,14 +246,8 @@ class SandboxManager:
             network_disabled=True,
             mem_limit=self.mem_limit,
             nano_cpus=self.nano_cpus,
-            volumes={
-                PARQUET_VOLUME_NAME: {"bind": "/data/parquet", "mode": "rw"},
-                SANDBOX_SOCKET_VOLUME_NAME: {"bind": SANDBOX_SOCKET_CONTAINER_MOUNT, "mode": "rw"},
-            },
-            environment={
-                "SANDBOX_ID": session_id,
-                "SANDBOX_SOCKET_ROOT": SANDBOX_SOCKET_CONTAINER_MOUNT,
-            },
+            volumes=volumes,
+            environment=environment,
             labels={"dataanalyzer.session_id": session_id},
         )
         create_s = time.perf_counter() - create_start
@@ -238,9 +257,17 @@ class SandboxManager:
         )
 
         client = SandboxClient(host_socket_path)
+        logger.info(
+            "sandbox creation: session=%s waiting for container %s to become healthy (timeout=%.1fs)",
+            session_id, container.short_id, self.health_timeout_seconds,
+        )
         try:
             self._wait_for_health(client, container, session_id)
         except Exception:
+            logger.warning(
+                "sandbox creation: session=%s container %s failed to become healthy - removing it",
+                session_id, container.short_id,
+            )
             try:
                 container.remove(force=True)
             except Exception:
@@ -275,8 +302,28 @@ class SandboxManager:
                 raise
             except Exception as exc:
                 last_error = exc
+                # Health polling runs every ~0.2s, so this is chatty at debug level and a
+                # periodic heartbeat at info level - previously this loop was completely
+                # silent for up to health_timeout_seconds, making a real failure
+                # indistinguishable from "just slow" until the final timeout message.
+                if attempt == 1 or attempt % 10 == 0:
+                    logger.info(
+                        "sandbox health check: session=%s container=%s still waiting "
+                        "(attempt=%d, socket=%s, last_error=%s)",
+                        session_id, container.short_id, attempt, client.socket_path, exc,
+                    )
+                else:
+                    logger.debug(
+                        "sandbox health check: session=%s attempt=%d failed: %s",
+                        session_id, attempt, exc,
+                    )
                 time.sleep(0.2)
 
+        logger.error(
+            "sandbox health check: session=%s container=%s gave up after %d attempt(s) over "
+            "%.1fs - last_error=%s",
+            session_id, container.short_id, attempt, self.health_timeout_seconds, last_error,
+        )
         raise SandboxManagerError(
             f"sandbox for session {session_id} did not become healthy within "
             f"{self.health_timeout_seconds}s ({attempt} attempt(s)): {last_error}"
@@ -286,30 +333,67 @@ class SandboxManager:
         self, session_id: str, code: str, tables: dict, workspace_id: str,
         timeout_seconds: float = None,
     ) -> dict:
-        client = self.get_or_create(session_id)
-        handle = self._sandboxes.get(session_id)
-        lock = handle.lock if handle is not None else threading.Lock()
+        """Run code_str in the session's sandbox, trying at most MAX_EXECUTE_ATTEMPTS times.
 
-        with lock:
-            t0 = time.perf_counter()
+        Both getting/creating the sandbox and the actual execute call can fail transiently
+        (container took too long to become healthy, UDS connection dropped mid-request,
+        etc.) - one retry from a clean sandbox clears most of those without making the
+        caller (the LLM agent, via the run_python tool) burn a whole turn just to try
+        again itself. If every attempt fails, this always returns an error dict - it never
+        raises - so run_python can hand the error back to the agent instead of the
+        exception propagating up and killing the investigation.
+        """
+        last_error = None
+
+        for attempt in range(1, self.MAX_EXECUTE_ATTEMPTS + 1):
+            logger.info(
+                "execute: session=%s attempt %d/%d (workspace=%s, tables=%d, code_chars=%d)",
+                session_id, attempt, self.MAX_EXECUTE_ATTEMPTS, workspace_id, len(tables), len(code),
+            )
+
             try:
-                result = client.execute(code, tables, workspace_id, timeout_seconds=timeout_seconds)
-            except SandboxClientError as exc:
+                client = self.get_or_create(session_id)
+            except SandboxManagerError as exc:
+                last_error = exc
                 logger.warning(
-                    "execution failed for session=%s: %s - destroying sandbox so the next "
-                    "call gets a fresh container instead of repeating the same failure",
-                    session_id, exc,
+                    "execute: session=%s attempt %d/%d could not get/create a sandbox: %s",
+                    session_id, attempt, self.MAX_EXECUTE_ATTEMPTS, exc,
                 )
                 self.release(session_id)
-                return {"stdout": "", "saved": [], "error": str(exc)}
-            finally:
-                if handle is not None:
-                    handle.last_used_at = time.time()
-            logger.info(
-                "execution time: session=%s completed in %.1fms",
-                session_id, (time.perf_counter() - t0) * 1000,
-            )
-            return result
+                continue
+
+            handle = self._sandboxes.get(session_id)
+            lock = handle.lock if handle is not None else threading.Lock()
+
+            with lock:
+                t0 = time.perf_counter()
+                try:
+                    result = client.execute(code, tables, workspace_id, timeout_seconds=timeout_seconds)
+                except SandboxClientError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "execute: session=%s attempt %d/%d execution failed after %.1fms: %s - "
+                        "destroying sandbox so the next attempt gets a fresh container",
+                        session_id, attempt, self.MAX_EXECUTE_ATTEMPTS,
+                        (time.perf_counter() - t0) * 1000, exc,
+                    )
+                    self.release(session_id)
+                    continue
+                finally:
+                    if handle is not None:
+                        handle.last_used_at = time.time()
+
+                logger.info(
+                    "execute: session=%s attempt %d/%d completed in %.1fms",
+                    session_id, attempt, self.MAX_EXECUTE_ATTEMPTS, (time.perf_counter() - t0) * 1000,
+                )
+                return result
+
+        logger.error(
+            "execute: session=%s gave up after %d attempt(s), returning error to caller: %s",
+            session_id, self.MAX_EXECUTE_ATTEMPTS, last_error,
+        )
+        return {"stdout": "", "saved": [], "error": str(last_error)}
 
     def release(self, session_id: str) -> None:
         with self._global_lock:

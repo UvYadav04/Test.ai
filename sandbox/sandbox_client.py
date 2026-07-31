@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 import requests
@@ -17,11 +18,14 @@ def _quote_socket_path(socket_path: str) -> str:
 
 class SandboxClient:
     def __init__(self, socket_path: str, timeout_seconds: float = 30.0):
-        logger.info("Initiating Socket cilent with   path: %s", socket_path)
         self.socket_path = socket_path
         self.timeout_seconds = timeout_seconds
         self._session = requests_unixsocket.Session()
         self._base_url = f"http+unix://{_quote_socket_path(socket_path)}"
+        logger.info(
+            "sandbox client created: socket_path=%s (exists on host right now=%s) timeout=%.1fs",
+            socket_path, os.path.exists(socket_path), timeout_seconds,
+        )
 
     def _url(self, path: str) -> str:
         return f"{self._base_url}{path}"

@@ -88,9 +88,30 @@ def _cleanup_stale_socket() -> None:
 
 
 def main() -> None:
+    logger.info(
+        "sandbox server boot: sandbox_id=%s SANDBOX_SOCKET_ROOT env=%s (resolved SOCKET_MOUNT=%s)",
+        SANDBOX_ID, os.environ.get("SANDBOX_SOCKET_ROOT"), SOCKET_MOUNT,
+    )
+    mount_existed_already = os.path.isdir(SOCKET_MOUNT)
     os.makedirs(SOCKET_MOUNT, exist_ok=True)
+    if not mount_existed_already:
+        logger.warning(
+            "sandbox server boot: SOCKET_MOUNT %s did NOT already exist - if this was "
+            "supposed to be a bind-mounted volume, the mount is missing/misconfigured and "
+            "the socket this server writes here will NOT be visible on the host",
+            SOCKET_MOUNT,
+        )
+    try:
+        existing_entries = os.listdir(SOCKET_MOUNT)
+    except OSError as exc:
+        existing_entries = [f"<could not list: {exc}>"]
+    logger.info(
+        "sandbox server boot: SOCKET_MOUNT %s contents before cleanup: %s",
+        SOCKET_MOUNT, existing_entries,
+    )
+
     _cleanup_stale_socket()
-    logger.info("sandbox server starting: sandbox_id=%s socket=%s", SANDBOX_ID, SOCKET_PATH)
+    logger.info("sandbox server starting: sandbox_id=%s binding UDS socket at %s", SANDBOX_ID, SOCKET_PATH)
     try:
         uvicorn.run(app, uds=SOCKET_PATH, log_level="info")
     finally:
@@ -98,6 +119,7 @@ def main() -> None:
         if os.path.exists(SOCKET_PATH):
             try:
                 os.remove(SOCKET_PATH)
+                logger.info("sandbox server shutdown: removed socket file %s", SOCKET_PATH)
             except OSError:
                 logger.exception("failed to remove socket file %s on shutdown", SOCKET_PATH)
 

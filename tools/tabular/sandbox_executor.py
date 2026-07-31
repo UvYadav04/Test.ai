@@ -43,14 +43,20 @@ class PythonSandbox:
         except InvalidArtifactIdError as exc:
             raise SandboxExecutionError(str(exc)) from exc
 
-        logger.debug(
-            "sandbox run: session=%s workspace=%s tables=%d",
-            self.session_id, workspace_id, len(container_tables),
+        logger.info(
+            "sandbox run: session=%s workspace=%s tables=%d timeout=%ss",
+            self.session_id, workspace_id, len(container_tables), self.timeout_seconds,
         )
         try:
+            # manager.execute() itself retries internally (see SandboxManager.MAX_EXECUTE_ATTEMPTS)
+            # and always returns an {"error": ...} dict rather than raising once it's exhausted
+            # those attempts - this except clause is just a defensive fallback for anything that
+            # still manages to raise SandboxManagerError before that loop starts (e.g. an invalid
+            # session_id failing validation).
             return self.manager.execute(
                 self.session_id, code, container_tables, workspace_id,
                 timeout_seconds=self.timeout_seconds,
             )
         except SandboxManagerError as exc:
+            logger.warning("sandbox run: session=%s manager.execute raised: %s", self.session_id, exc)
             raise SandboxExecutionError(str(exc)) from exc
