@@ -252,7 +252,6 @@ class SandboxManager:
         )
         container.reload()
         print(container.status)
-        import time
         time.sleep(1)
         print(container.logs().decode())
         time.sleep(1)
