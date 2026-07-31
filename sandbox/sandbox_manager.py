@@ -189,7 +189,9 @@ class SandboxManager:
         self.ensure_image()
 
         socket_filename = f"{session_id}.sock"
-        host_socket_path = os.path.join(self.socket_root, socket_filename)
+        # host_socket_path = os.path.join(self.socket_root, socket_filename)
+        socket_root = os.environ.get("SANDBOX_SOCKET_ROOT", "/shared")
+        host_socket_path = os.path.join(socket_root, f"{session_id}.sock")
         logger.info("Socket path: %s", host_socket_path)
         logger.info("Socket root: %s", self.socket_root)
         if os.path.exists(host_socket_path):
@@ -213,7 +215,10 @@ class SandboxManager:
                 PARQUET_VOLUME_NAME: {"bind": "/data/parquet", "mode": "rw"},
                 SANDBOX_SOCKET_VOLUME_NAME: {"bind": SANDBOX_SOCKET_CONTAINER_MOUNT, "mode": "rw"},
             },
-            environment={"SANDBOX_ID": session_id},
+            environment={
+                "SANDBOX_ID": session_id,
+                "SANDBOX_SOCKET_ROOT": SANDBOX_SOCKET_CONTAINER_MOUNT,
+            },
             labels={"dataanalyzer.session_id": session_id},
         )
         create_s = time.perf_counter() - create_start
