@@ -95,11 +95,27 @@ class SandboxManager:
         start = time.perf_counter()
         try:
             self.client.images.get(self.image)
-            logger.debug("sandbox image cached, check took %.3fs", time.perf_counter() - start)
+            logger.info("sandbox image exists")
+            return
         except ImageNotFound:
-            logger.info("sandbox image not found - building from %s (this only happens once)", _SANDBOX_DIR)
-            self.client.images.build(path=_SANDBOX_DIR, tag=self.image, rm=True)
-            logger.info("sandbox image built in %.3fs", time.perf_counter() - start)
+            logger.info("sandbox image not found")
+
+        try:
+            logger.info("building image from %s", _SANDBOX_DIR)
+            image, logs = self.client.images.build(
+                path=_SANDBOX_DIR,
+                tag=self.image,
+                rm=True,
+            )
+            for chunk in logs:
+                if "stream" in chunk:
+                    logger.info(chunk["stream"].rstrip())
+                elif "error" in chunk:
+                    logger.error(chunk["error"])
+            logger.info("image built in %.2fs", time.perf_counter() - start)
+        except Exception as e:
+            logger.exception("Failed to build sandbox image : ",e)
+            raise
 
     def get_or_create(self, session_id: str, user_id: str | None = None) -> SandboxClient:
         try:
