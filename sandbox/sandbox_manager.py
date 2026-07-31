@@ -17,7 +17,7 @@ _SANDBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 PARQUET_VOLUME_NAME = os.environ.get("PARQUET_VOLUME_NAME", "dataanalyzer_parquet_data")
 
 SANDBOX_SOCKET_VOLUME_NAME = os.environ.get("SANDBOX_SOCKET_VOLUME_NAME", "dataanalyzer_sandbox_sockets")
-SANDBOX_SOCKET_CONTAINER_MOUNT = "/shared"
+SANDBOX_SOCKET_CONTAINER_MOUNT = os.environ.get("SANDBOX_SOCKET_ROOT", "/shared")
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_IDLE_TIMEOUT_SECONDS", "300"))
 DEFAULT_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("SANDBOX_HEALTH_TIMEOUT_SECONDS", "15"))
