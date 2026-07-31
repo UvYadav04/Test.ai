@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger("sandbox.server")
 
 SANDBOX_ID = os.environ.get("SANDBOX_ID", "default")
-SOCKET_MOUNT = "/shared"
+SOCKET_MOUNT = os.environ.get("SANDBOX_SOCKET_ROOT", "/shared")
 SOCKET_PATH = os.path.join(SOCKET_MOUNT, f"{SANDBOX_ID}.sock")
 
 app = FastAPI(title="dataanalyzer-sandbox", docs_url=None, redoc_url=None)

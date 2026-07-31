@@ -189,11 +189,8 @@ class SandboxManager:
         self.ensure_image()
 
         socket_filename = f"{session_id}.sock"
-        # host_socket_path = os.path.join(self.socket_root, socket_filename)
-        socket_root = os.environ.get("SANDBOX_SOCKET_ROOT", "/shared")
-        host_socket_path = os.path.join(socket_root, f"{session_id}.sock")
+        host_socket_path = os.path.join(self.socket_root, socket_filename)
         logger.info("Socket path: %s", host_socket_path)
-        logger.info("Socket root: %s", self.socket_root)
         if os.path.exists(host_socket_path):
             logger.warning(
                 "sandbox creation: removing stale socket file %s before starting new container",
