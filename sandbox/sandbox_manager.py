@@ -250,6 +250,14 @@ class SandboxManager:
             environment=environment,
             labels={"dataanalyzer.session_id": session_id},
         )
+        container.reload()
+        print(container.status)
+        import time
+        time.sleep(1)
+        print(container.logs().decode())
+        time.sleep(1)
+        container.reload()
+        print(container.status)
         create_s = time.perf_counter() - create_start
         logger.info(
             "sandbox creation: container %s created+started for session=%s in %.3fs",
