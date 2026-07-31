@@ -62,8 +62,6 @@ class DocumentAgent:
         await self.agent.on_reset(CancellationToken())
 
         constraints = constraints or {}
-        # thread_context matters most when this agent was DIRECT-routed (see run_investigation's
-        # direct_route branch) - see TabularAgent.run()'s matching comment for why.
         task = (
             f"Objective: {objective}\n"
             f"Assigned file_ids: {self.tools.assigned_file_ids}\n"
@@ -95,12 +93,6 @@ class DocumentAgent:
         self.logger.info("document agent run took %.3fs", time.perf_counter() - run_start)
         table_refs = self._extract_refs(transcript, "table_ref")
         chunk_refs = self._extract_refs(transcript, "chunk_id")
-        # Only DIRECT_SYSTEM_MESSAGE actually asks for a FOLLOW_UP_QUESTIONS section (see
-        # agents/document/config.py) - harmless no-op when this agent was delegated BY the
-        # Orchestrator instead (no marker present, so summary/follow_up_questions come back
-        # unchanged/empty). Split BEFORE the source_refs membership check below so a chunk_id
-        # that happened to only appear in the (now-stripped) follow-up lines is never miscounted
-        # as cited in the real answer.
         summary, follow_up_questions = split_follow_up_questions(final_text)
         return DocumentFindings(
             summary=summary,

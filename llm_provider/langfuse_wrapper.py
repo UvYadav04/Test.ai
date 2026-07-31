@@ -94,7 +94,7 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
                       extra_create_args={}, cancellation_token=None) -> CreateResult:
         start = time.monotonic()
         call_id = id(messages)
-        if calls_logger.isEnabledFor(logging.INFO):
+        if calls_logger.    isEnabledFor(logging.INFO):
             calls_logger.info(
                 "llm request [%x] %s/%s - %d message(s), %d tool(s), tool_choice=%s:\n%s",
                 call_id, self._provider_name, self._model or "default", len(messages), len(tools), tool_choice,

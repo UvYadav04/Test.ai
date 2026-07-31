@@ -46,30 +46,3 @@ class DoclingChunker(BaseChunker):
             return 0
 
 
-class FixedSizeChunker(BaseChunker):
-    def __init__(self, chunk_size: int = 1000, overlap: int = 100):
-        if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
-        if overlap < 0 or overlap >= chunk_size:
-            raise ValueError("overlap must be >= 0 and smaller than chunk_size")
-        self.chunk_size = chunk_size
-        self.overlap = overlap
-
-    def chunk_document(self, document) -> list:
-        text = document.export_to_text() if hasattr(document, "export_to_text") else str(document)
-        text = text.strip()
-        if not text:
-            return []
-
-        step = self.chunk_size - self.overlap
-        chunks = []
-        index = 0
-        start = 0
-        while start < len(text):
-            end = min(start + self.chunk_size, len(text))
-            chunks.append(Chunk(text=text[start:end], chunk_index=index, page=0))
-            index += 1
-            if end == len(text):
-                break
-            start += step
-        return chunks

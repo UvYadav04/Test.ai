@@ -25,9 +25,7 @@ class TabularAgent:
         reports_dir: str = "data/reports", chart_capacity_checker=None,
     ):
         self.logger = get_agent_logger("tabular_agent")
-        # chat_id (not investigation_id) keys the underlying sandbox - it now persists warm for
-        # the whole chat (across turns), released only on chat switch or 5-minute idle, not torn
-        # down at the end of every single investigation. See sandbox/sandbox_manager.py.
+        
         self.tools = TabularTools(
             assigned_files, storage=storage, workspace_id=workspace_id,
             chat_id=chat_id, sandbox_manager=sandbox_manager,
@@ -62,12 +60,6 @@ class TabularAgent:
 
         constraints = constraints or {}
         allowed_files = self.tools.list_allowed_files()
-        # thread_context matters most when this agent was DIRECT-routed (see run_investigation's
-        # direct_route branch) - the Orchestrator never even gets involved, so this is the ONLY
-        # place "show me a chart of THIS data" (referring to a file/result from an earlier turn)
-        # can get resolved. When the Orchestrator invoked this agent instead, it's already folded
-        # earlier turns into its own objective text, so this is usually redundant there - never
-        # harmful either way.
         task = (
             f"Objective: {objective}\n"
             f"Assigned files - use these exact file_id/table_name values, do not guess or "
@@ -100,10 +92,6 @@ class TabularAgent:
         self.logger.info("tabular agent run took %.3fs", time.perf_counter() - run_start)
         real_refs = self._real_refs(self._extract_refs(transcript, "file_id"))
         chart_locations = [entry["location"] for entry in self.tools.charts_created]
-        # Only DIRECT_SYSTEM_MESSAGE actually asks for a FOLLOW_UP_QUESTIONS section (see
-        # agents/tabular/config.py) - when this agent was delegated BY the Orchestrator instead,
-        # final_text has no marker, so this is a harmless no-op there (returns final_text
-        # unchanged, empty question list).
         summary, follow_up_questions = split_follow_up_questions(final_text)
         return TabularFindings(
             summary=summary,

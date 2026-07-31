@@ -19,10 +19,6 @@ PARQUET_VOLUME_NAME = os.environ.get("PARQUET_VOLUME_NAME", "dataanalyzer_parque
 SANDBOX_SOCKET_VOLUME_NAME = os.environ.get("SANDBOX_SOCKET_VOLUME_NAME", "dataanalyzer_sandbox_sockets")
 SANDBOX_SOCKET_CONTAINER_MOUNT = "/shared"
 
-# 5 minutes - a sandbox is now scoped and kept warm per CHAT (see get_or_create's session_id
-# param, and worker_service/tasks/investigation.py which passes chat_id as that id), not per
-# investigation/turn, so this is genuinely "how long can a chat sit idle before we give the
-# container back" rather than a single request's timeout budget.
 DEFAULT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_IDLE_TIMEOUT_SECONDS", "300"))
 DEFAULT_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("SANDBOX_HEALTH_TIMEOUT_SECONDS", "15"))
 DEFAULT_REAP_INTERVAL_SECONDS = int(os.environ.get("SANDBOX_REAP_INTERVAL_SECONDS", "60"))
@@ -106,16 +102,6 @@ class SandboxManager:
             logger.info("sandbox image built in %.3fs", time.perf_counter() - start)
 
     def get_or_create(self, session_id: str, user_id: str | None = None) -> SandboxClient:
-        """`session_id` is chat_id in practice (see module docstring at the top of this file) -
-        the sandbox persists warm across every message in that chat, not just within one
-        investigation/turn.
-
-        `user_id`, when given, enforces "one warm sandbox per user at a time": if this user's
-        previous message was in a DIFFERENT session_id (chat), that chat's sandbox is released
-        first. Pass user_id only from the ONE call site that represents "a user just started
-        interacting with this chat" (the pre-warm at the top of run_investigation) - internal
-        reuse calls (e.g. from execute()) should leave it None so they don't re-trigger eviction
-        mid-investigation."""
         try:
             validate_segment(session_id, "session_id")
         except InvalidArtifactIdError as exc:
@@ -188,6 +174,8 @@ class SandboxManager:
 
         socket_filename = f"{session_id}.sock"
         host_socket_path = os.path.join(self.socket_root, socket_filename)
+        logger.info("Socket path: %s", host_socket_path)
+        logger.info("Socket root: %s", self.socket_root)
         if os.path.exists(host_socket_path):
             logger.warning(
                 "sandbox creation: removing stale socket file %s before starting new container",

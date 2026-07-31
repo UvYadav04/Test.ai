@@ -1,18 +1,3 @@
-"""Shared formatting for Chat thread continuity (see worker_service/tasks/investigation.py's
-_thread_context - summary/recent_turns/files_used/files_created read off the Chat doc) into a
-prompt-ready brief.
-
-Used by every agent that can end up being the one actually producing the final answer for a
-turn: OrchestratorAgent always, and TabularAgent/DocumentAgent too when run_investigation
-direct-routes to them (skipping the Orchestrator entirely - see _run_tabular_direct/
-_run_document_direct). Without this, a direct-routed agent sees ONLY the current message with no
-memory of earlier turns in the same chat, so a follow-up like "show me a chart of this data" -
-where "this data" refers to something established a turn or two earlier - has nothing to resolve
-the reference against. Centralized here (rather than duplicated per agent) so all three read
-"earlier context" the exact same way.
-"""
-
-
 def thread_context_brief(thread_context: dict | None) -> str:
     if not thread_context:
         return "This is the first message in this chat - no earlier context."

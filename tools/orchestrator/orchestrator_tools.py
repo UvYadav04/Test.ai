@@ -39,8 +39,6 @@ class OrchestratorTools:
         self.result_collector = result_collector or FinalResultCollector()
         self.storage = storage
         self.workspace_id = "default"
-        # Used only to key/scope the Tabular Agent's sandbox (see invoke_tabular_agent below) -
-        # chat-scoped now, not investigation-scoped (sandbox/sandbox_manager.py).
         self.chat_id = chat_id
         self.sandbox_manager = sandbox_manager
         self.chart_capacity_checker = chart_capacity_checker

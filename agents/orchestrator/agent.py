@@ -83,9 +83,6 @@ class OrchestratorAgent:
         fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
         client = LLMProvider(model_config["provider"], fallback_provider=fallback_provider).get_client(model_config["model"])
 
-        # chat_id (not investigation_id) - the sandbox this eventually reaches, via
-        # OrchestratorTools.invoke_tabular_agent -> TabularAgent -> TabularTools, is now scoped
-        # and kept warm per CHAT, not per investigation/turn (see sandbox/sandbox_manager.py).
         self.tools = OrchestratorTools(
             catalog, state=None, vector_store=vector_store, reranker=reranker, memory=memory, storage=storage,
             reports_dir=reports_dir, chat_id=chat_id, sandbox_manager=sandbox_manager,
