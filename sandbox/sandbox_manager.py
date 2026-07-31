@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import threading
@@ -11,13 +12,25 @@ from sandbox.sandbox_client import SandboxClient, SandboxClientError
 
 logger = logging.getLogger("sandbox.manager")
 
-IMAGE_NAME = "dataanalyzer-sandbox:latest"
 _SANDBOX_DIR = os.path.dirname(os.path.abspath(__file__))
+
+_SANDBOX_SOURCE_FILES = ("Dockerfile", "sandbox_server.py", "execution_engine.py", "path_resolver.py")
+
+
+def _sandbox_image_tag() -> str:
+    h = hashlib.sha256()
+    for name in _SANDBOX_SOURCE_FILES:
+        with open(os.path.join(_SANDBOX_DIR, name), "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:12]
+
+
+IMAGE_NAME = f"dataanalyzer-sandbox:{_sandbox_image_tag()}"
 
 PARQUET_VOLUME_NAME = os.environ.get("PARQUET_VOLUME_NAME", "dataanalyzer_parquet_data")
 
 SANDBOX_SOCKET_VOLUME_NAME = os.environ.get("SANDBOX_SOCKET_VOLUME_NAME", "dataanalyzer_sandbox_sockets")
-SANDBOX_SOCKET_CONTAINER_MOUNT = os.environ.get("SANDBOX_SOCKET_ROOT", "/shared")
+SANDBOX_SOCKET_CONTAINER_MOUNT = os.environ.get("SANDBOX_SOCKET_ROOT", "/data/sandbox_sockets")
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_IDLE_TIMEOUT_SECONDS", "300"))
 DEFAULT_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("SANDBOX_HEALTH_TIMEOUT_SECONDS", "15"))
