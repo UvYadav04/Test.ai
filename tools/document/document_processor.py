@@ -159,6 +159,12 @@ class DocumentProcessor:
     async def run(self, objective: str, constraints: dict = None, on_event=None) -> DocumentFindings:
         run_start = time.perf_counter()
 
+        # Every tool_call emitted below MUST be followed by exactly one tool_result/tool_error,
+        # on every exit path (including early returns) - the frontend (InvestigationTrail.tsx)
+        # pairs them with a stack, so an unmatched tool_call leaves that row spinning forever
+        # even after the investigation has actually finished. DocumentAgent/TabularAgent don't
+        # have to worry about this - their tool events come straight from autogen's own paired
+        # call/result stream - but this pipeline crafts events by hand, so it's on us here.
         if on_event is not None:
             await on_event({"type": "tool_call", "message": "Reading the full document"})
 
@@ -167,6 +173,8 @@ class DocumentProcessor:
             self.logger.warning(
                 "document_processor: no chunks found for file_ids=%s", self.assigned_file_ids,
             )
+            if on_event is not None:
+                await on_event({"type": "tool_error", "message": "Reading the full document"})
             return DocumentFindings(
                 summary="No content was found for the assigned file(s), so no analysis could be produced.",
                 artifact_refs=[], source_refs=[],
@@ -191,11 +199,26 @@ class DocumentProcessor:
         )
 
         merged = merge_batch_outputs(batch_outputs)
+        # A batch returns {} for a failed LLM call or unparseable output (see _process_batch) -
+        # if every single one came back empty, nothing was actually read; anything less than
+        # that still counts as a completed (if partial) read, same "partial success still
+        # reports success" convention TabularTools.create_visualizations uses.
+        reading_failed = bool(batches) and all(not output for output in batch_outputs)
 
         if on_event is not None:
+            await on_event({
+                "type": "tool_error" if reading_failed else "tool_result",
+                "message": "Reading the full document",
+            })
             await on_event({"type": "tool_call", "message": "Synthesizing the final answer"})
 
-        final_text = await self._synthesize(objective, merged)
+        final_text, synthesis_ok = await self._synthesize(objective, merged)
+
+        if on_event is not None:
+            await on_event({
+                "type": "tool_result" if synthesis_ok else "tool_error",
+                "message": "Synthesizing the final answer",
+            })
 
         source_refs = list(dict.fromkeys(c.chunk_id for c in chunks))
         self.logger.info(
@@ -235,7 +258,7 @@ class DocumentProcessor:
             return {}
         return parsed
 
-    async def _synthesize(self, objective: str, merged: dict) -> str:
+    async def _synthesize(self, objective: str, merged: dict) -> tuple[str, bool]:
         client = self.llm_provider.get_client(self._model)
         prompt = (
             _SYNTHESIS_SYSTEM_PROMPT
@@ -244,10 +267,10 @@ class DocumentProcessor:
         )
         try:
             result = await ask_llm_async(client, prompt)
-            return result.strip()
+            return result.strip(), True
         except Exception:
             self.logger.exception("document_processor: final synthesis call failed")
             return (
                 "Could not synthesize a final answer due to an internal error. Raw extracted "
                 f"findings:\n{json.dumps(merged, indent=2)}"
-            )
+            ), False
