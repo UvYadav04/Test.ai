@@ -290,26 +290,45 @@ class OrchestratorTools:
         self.result_collector.add_artifact(path, kind="report", format="csv", source_tool="generate_csv")
         return path
 
-    def generate_markdown_report(
+    async def generate_report(
         self,
         title: str,
         objective: str,
-        summary: str,
-        findings: list,
+        context: str,
         open_questions: Optional[list] = None,
         name: Optional[str] = None,
     ) -> str:
-        """Build a markdown report file from your OWN synthesized investigation results - pass
-        your own summary and findings text (short strings you write), not raw tool output. Use
-        this when the user asks for a written report/document, not a CSV or dashboard. Creates a
-        new folder under today's date named after `name` (falls back to a slug of title) and
-        writes the report there. Returns the file path - report it in your final answer and in
-        artifact_refs."""
+        """Write a polished markdown report FILE from findings you already have - an LLM
+        composes the actual report text from the `context` you pass, so you only need to give
+        it just enough detail, not a fully pre-formatted document. Use this whenever the user
+        asks for a written report/document.
+
+        Before calling this, check whether you already have what the report needs:
+        - Did an earlier invoke_tabular_agent/invoke_document_agent/invoke_document_processor
+          call THIS investigation already produce the relevant findings, or a chart for the same
+          data? Reuse that result (and mention the existing chart by its plain-language title in
+          `context`) instead of calling an agent again just to regather content for the report.
+        - Does the task's recent conversation history/summary already contain what's needed?
+          Reuse it the same way.
+        Only call an agent again if something the report genuinely needs is actually missing -
+        do not re-run analysis solely to produce a report about something you already found.
+
+        Arguments:
+        - title: report title.
+        - objective: why this report is being written (one sentence is enough).
+        - context: everything the report should draw on, written in your own words - specific
+          numbers, names, comparisons, and which files/analyses they came from. This is the
+          model's ONLY source of facts: it will not invent anything beyond what you give it
+          here, so be concrete and complete.
+        - open_questions: optional list of caveats/unresolved items to note at the end.
+        - name: short output folder name (falls back to a slug of title).
+
+        Returns the generated file path - report it in your final answer and in artifact_refs."""
         if self.reporting is None:
             raise RuntimeError("no storage configured, cannot generate files")
-        path = self.reporting.generate_markdown_report(title, objective, summary, findings, open_questions, name)
+        path = await self.reporting.generate_report(title, objective, context, open_questions, name)
         self.result_collector.add_artifact(
-            path, kind="report", format="markdown", source_tool="generate_markdown_report",
+            path, kind="report", format="markdown", source_tool="generate_report",
         )
         return path
 

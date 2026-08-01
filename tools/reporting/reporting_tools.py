@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import re
@@ -11,6 +12,9 @@ import pandas as pd
 
 from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
 from tools.reporting.models import ChartSpec
+from tools.reporting.report_writer import compose_report_markdown
+
+logger = logging.getLogger("tools.reporting")
 
 PALETTE = [
     "#CC785C",
@@ -42,7 +46,7 @@ class ReportingTools:
         self._copy_source(workspace_id, file_id, folder)
         return path
 
-    def generate_markdown_report(
+    def _deterministic_report_template(
         self,
         title: str,
         objective: str,
@@ -51,6 +55,8 @@ class ReportingTools:
         open_questions: Optional[list] = None,
         name: Optional[str] = None,
     ) -> str:
+        """Rigid title/summary/findings template - internal fallback used only by generate_report
+        when the LLM composition fails, not exposed as its own tool."""
         lines = [f"# {title}", "", f"**Objective:** {objective}", "", "## Summary", "", summary]
 
         if findings:
@@ -67,6 +73,34 @@ class ReportingTools:
         path = os.path.join(folder, "report.md")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
+        return path
+
+    async def generate_report(
+        self,
+        title: str,
+        objective: str,
+        context: str,
+        open_questions: Optional[list] = None,
+        name: Optional[str] = None,
+    ) -> str:
+        """LLM-composed markdown report from an already-written context string. Falls back to a
+        deterministic title/summary/findings template (treating `context` as the summary) if the
+        composition call fails or returns nothing usable, so this never surfaces a broken/empty
+        report."""
+        markdown, ok = await compose_report_markdown(title, objective, context)
+        if not ok:
+            logger.warning(
+                "generate_report: LLM composition failed for %r, falling back to the "
+                "deterministic template", title,
+            )
+            return self._deterministic_report_template(
+                title, objective, context, findings=[], open_questions=open_questions, name=name,
+            )
+
+        folder = self._new_folder(name or title, "report")
+        path = os.path.join(folder, "report.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(markdown)
         return path
 
     def render_single_chart(self, workspace_id: str, spec: ChartSpec, name: Optional[str] = None) -> str:

@@ -250,7 +250,7 @@ class OrchestratorAgent:
         "invoke_document_agent": "Assigning an agent",
         "invoke_document_processor": "Assigning an agent",
         "generate_csv": "Exporting a CSV",
-        "generate_markdown_report": "Writing a report",
+        "generate_report": "Writing a report",
         "generate_dashboard": "Building a real-time dashboard",
         "get_current_date": "Checking today's date",
         "recall_user_info": "Recalling saved preferences",

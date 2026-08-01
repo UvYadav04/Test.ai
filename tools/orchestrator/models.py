@@ -1,6 +1,14 @@
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+
+# Matches synthetic per-sheet-table file_ids minted by xlsx_ingestor.py as
+# f"{workbook_file_id}_table_{index}" (e.g. "764e3fac8634463abab3a8aa45a36bd2_table_0") - these
+# only ever exist as virtual FileCatalog entries pointing at the parent workbook's real upload,
+# never as their own File document, so they have nothing to resolve to on the client and just
+# show up as a raw internal id in the "files used" row instead of a filename.
+_SYNTHETIC_TABLE_REF_RE = re.compile(r"^[0-9a-f]{8,}_table_\d+$")
 
 
 @dataclass
@@ -65,8 +73,11 @@ class FinalResultCollector:
 
     def add_files_used(self, file_ids: list) -> None:
         for file_id in file_ids or []:
-            if file_id and file_id not in self.files_used:
-                self.files_used.append(file_id)
+            if not file_id or file_id in self.files_used:
+                continue
+            if _SYNTHETIC_TABLE_REF_RE.match(file_id):
+                continue
+            self.files_used.append(file_id)
 
     def add_tabular_findings(self, findings, source_tool: str, assigned_file_ids: list) -> None:
         self.add_files_used(assigned_file_ids)

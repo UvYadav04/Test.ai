@@ -18,8 +18,8 @@ CAPABILITY_TOOLS: dict[str, dict] = {
         "description": "export an existing data artifact as a CSV file",
     },
     "report": {
-        "tools": ["generate_markdown_report"],
-        "description": "write a synthesized markdown report file",
+        "tools": ["generate_report"],
+        "description": "write an LLM-composed markdown report file from findings you already have",
     },
 }
 
