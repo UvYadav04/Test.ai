@@ -538,8 +538,8 @@ class SandboxManager:
         except Exception:
             logger.warning("sandbox creation: id=%s failed to become healthy - removing it", sandbox_id)
             try:
-                # container.remove(force=True)
-                container.stop()
+                container.remove(force=True)
+                # container.stop()
             except Exception:
                 pass
             raise

@@ -298,10 +298,13 @@ class OrchestratorTools:
         open_questions: Optional[list] = None,
         name: Optional[str] = None,
     ) -> str:
-        """Write a polished markdown report FILE from findings you already have - an LLM
-        composes the actual report text from the `context` you pass, so you only need to give
-        it just enough detail, not a fully pre-formatted document. Use this whenever the user
-        asks for a written report/document.
+        """Write a polished, substantial (1.5-2 page) markdown report FILE from findings you
+        already have - an LLM composes the actual report text, so you only need to give it a
+        short frame; the full raw trace of everything gathered THIS investigation (every
+        invoke_tabular_agent/invoke_document_agent/invoke_document_processor call and finding) is
+        attached automatically on top of your `context`, so the report writer always has the
+        complete underlying data, not just your summary of it. Use this whenever the user asks
+        for a written report/document.
 
         Before calling this, check whether you already have what the report needs:
         - Did an earlier invoke_tabular_agent/invoke_document_agent/invoke_document_processor
@@ -316,17 +319,31 @@ class OrchestratorTools:
         Arguments:
         - title: report title.
         - objective: why this report is being written (one sentence is enough).
-        - context: everything the report should draw on, written in your own words - specific
-          numbers, names, comparisons, and which files/analyses they came from. This is the
-          model's ONLY source of facts: it will not invent anything beyond what you give it
-          here, so be concrete and complete.
+        - context: a short frame in your own words - what this report is about and its headline
+          takeaway. You do NOT need to restate every number here: the full investigation trace
+          (all findings, all figures, from every tool call made this session) is appended
+          automatically, so keep this to orientation, not transcription. Still never invent
+          anything - everything you add here must be true.
         - open_questions: optional list of caveats/unresolved items to note at the end.
         - name: short output folder name (falls back to a slug of title).
 
         Returns the generated file path - report it in your final answer and in artifact_refs."""
         if self.reporting is None:
             raise RuntimeError("no storage configured, cannot generate files")
-        path = await self.reporting.generate_report(title, objective, context, open_questions, name)
+        # Auto-attach the full raw investigation trace (every tool call/finding this session) on
+        # top of the orchestrator's own short `context`, so the LLM report writer always has the
+        # complete underlying data rather than depending on how much the orchestrator chose to
+        # transcribe into `context` itself - see report_writer.py's module docstring.
+        investigation_trace = self.state.summary() if self.state is not None else ""
+        full_context = context
+        if investigation_trace:
+            full_context = (
+                f"{context}\n\n"
+                "--- Full investigation trace (everything gathered this session - use this as "
+                "the primary source of detail) ---\n"
+                f"{investigation_trace}"
+            )
+        path = await self.reporting.generate_report(title, objective, full_context, open_questions, name)
         self.result_collector.add_artifact(
             path, kind="report", format="markdown", source_tool="generate_report",
         )
