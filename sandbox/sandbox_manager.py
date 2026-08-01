@@ -45,19 +45,6 @@ try:
     from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
     def _metric(cls, name, documentation, **kwargs):
-        """Create a metric, or reuse whatever's already registered under that name.
-
-        This module can legitimately get imported twice under two different dotted paths in
-        the same process - once as `analyzerEngine.sandbox.sandbox_manager`, once as bare
-        `sandbox.sandbox_manager` from analyzerEngine's own internal code (see
-        ARCHITECTURE.md §5.2 for the full story: sys.modules treats those as two unrelated
-        modules, so this module body genuinely runs twice). prometheus_client's default
-        REGISTRY, unlike sys.modules, is a true process-wide singleton, so the second
-        execution's Gauge()/Counter()/Histogram() calls collide with the first's and raise
-        DuplicateTimeseries (a ValueError subclass) instead of silently shadowing it. Reusing
-        the already-registered collector keeps both module copies pointed at the same metric
-        object instead of crashing worker startup over it.
-        """
         try:
             return cls(name, documentation, **kwargs)
         except ValueError:
@@ -290,7 +277,6 @@ class SandboxManager:
             logger.exception("ensure_image: failed to build sandbox image %s", self.image)
             raise
 
-    # ---------------------------------------------------------------------- pool sizing ----
 
     def _total_locked(self) -> int:
         """Caller must hold self._lock."""
@@ -552,7 +538,8 @@ class SandboxManager:
         except Exception:
             logger.warning("sandbox creation: id=%s failed to become healthy - removing it", sandbox_id)
             try:
-                container.remove(force=True)
+                # container.remove(force=True)
+                container.stop()
             except Exception:
                 pass
             raise
