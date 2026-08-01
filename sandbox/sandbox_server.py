@@ -1,14 +1,21 @@
+import time
+BOOT_T0 = time.perf_counter()
+print(f"[BOOT] Python process started (+{time.perf_counter() - BOOT_T0:.3f}s)", flush=True)
+
 import logging
 import os
 import signal
 import threading
 import time
 import traceback
+import os
 
 import uvicorn
 from execution_engine import ExecutionEngine
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+print(f"[BOOT] Imports finished (+{time.perf_counter() - BOOT_T0:.3f}s)", flush=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +32,9 @@ engine = ExecutionEngine()
 STARTED_AT = time.time()
 
 
+engine = ExecutionEngine()
+
+print(f"[BOOT] ExecutionEngine created (+{time.perf_counter() - BOOT_T0:.3f}s)", flush=True)
 class ExecuteRequest(BaseModel):
     code: str
     tables: dict[str, str]
@@ -38,6 +48,8 @@ def health():
         "sandbox_id": SANDBOX_ID,
         "uptime_s": round(time.time() - STARTED_AT, 1),
         "executions": engine.executions,
+        "resets": engine.resets,
+        "healthy": engine.healthy,
     }
 
 
@@ -62,8 +74,8 @@ def execute(req: ExecuteRequest):
 @app.post("/reset")
 def reset():
     logger.info("request: POST /reset (sandbox=%s)", SANDBOX_ID)
-    engine.reset()
-    return {"status": "reset", "sandbox_id": SANDBOX_ID}
+    healthy = engine.reset()
+    return {"status": "reset", "sandbox_id": SANDBOX_ID, "healthy": healthy}
 
 
 @app.post("/shutdown")
@@ -89,11 +101,26 @@ def _cleanup_stale_socket() -> None:
 
 def main() -> None:
     logger.info(
+        "[BOOT +%.3fs] Entered main()",
+        time.perf_counter() - BOOT_T0,
+    )
+    logger.info(
         "sandbox server boot: sandbox_id=%s SANDBOX_SOCKET_ROOT env=%s (resolved SOCKET_MOUNT=%s)",
         SANDBOX_ID, os.environ.get("SANDBOX_SOCKET_ROOT"), SOCKET_MOUNT,
     )
     mount_existed_already = os.path.isdir(SOCKET_MOUNT)
+    logger.info(
+        "[BOOT +%.3fs] Creating socket directory %s",
+        time.perf_counter() - BOOT_T0,
+        SOCKET_MOUNT,
+    )
+
     os.makedirs(SOCKET_MOUNT, exist_ok=True)
+
+    logger.info(
+        "[BOOT +%.3fs] Socket directory ready",
+        time.perf_counter() - BOOT_T0,
+    )
     if not mount_existed_already:
         logger.warning(
             "sandbox server boot: SOCKET_MOUNT %s did NOT already exist - if this was "
@@ -114,6 +141,8 @@ def main() -> None:
     logger.info("sandbox server starting: sandbox_id=%s binding UDS socket at %s", SANDBOX_ID, SOCKET_PATH)
     try:
         uvicorn.run(app, uds=SOCKET_PATH, log_level="info")
+        logger.info(os.path.exists(SOCKET_PATH))
+        logger.info(os.stat(SOCKET_PATH))
     finally:
         logger.info("sandbox server stopped: sandbox_id=%s - cleaning up socket file", SANDBOX_ID)
         if os.path.exists(SOCKET_PATH):

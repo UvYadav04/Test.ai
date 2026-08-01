@@ -11,6 +11,14 @@ class SandboxExecutionError(RuntimeError):
 
 
 class PythonSandbox:
+    """Thin per-agent-instance wrapper around the shared sandbox pool.
+
+    This does NOT own a dedicated sandbox - `session_id` is kept only as a tag for
+    logging/attribution. Every run() call acquires whatever sandbox is idle in the shared
+    pool, executes on it, and returns it; the pool (not this object) owns container
+    lifecycle.
+    """
+
     def __init__(
         self,
         root_dir: str,
@@ -44,19 +52,20 @@ class PythonSandbox:
             raise SandboxExecutionError(str(exc)) from exc
 
         logger.info(
-            "sandbox run: session=%s workspace=%s tables=%d timeout=%ss",
+            "sandbox run: tag=%s workspace=%s tables=%d timeout=%ss",
             self.session_id, workspace_id, len(container_tables), self.timeout_seconds,
         )
         try:
-            # manager.execute() itself retries internally (see SandboxManager.MAX_EXECUTE_ATTEMPTS)
-            # and always returns an {"error": ...} dict rather than raising once it's exhausted
-            # those attempts - this except clause is just a defensive fallback for anything that
-            # still manages to raise SandboxManagerError before that loop starts (e.g. an invalid
-            # session_id failing validation).
+            # manager.execute() retries internally against the pool (see
+            # SandboxManager.MAX_EXECUTE_ATTEMPTS) and always returns an {"error": ...} dict
+            # rather than raising once attempts are exhausted - this except clause is just a
+            # defensive fallback for anything that still manages to raise before that loop
+            # starts (e.g. an invalid workspace_id failing validation, or the pool being
+            # exhausted and every acquire() attempt timing out).
             return self.manager.execute(
-                self.session_id, code, container_tables, workspace_id,
-                timeout_seconds=self.timeout_seconds,
+                code, container_tables, workspace_id,
+                timeout_seconds=self.timeout_seconds, tag=self.session_id,
             )
         except SandboxManagerError as exc:
-            logger.warning("sandbox run: session=%s manager.execute raised: %s", self.session_id, exc)
+            logger.warning("sandbox run: tag=%s manager.execute raised: %s", self.session_id, exc)
             raise SandboxExecutionError(str(exc)) from exc

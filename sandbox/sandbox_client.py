@@ -4,6 +4,7 @@ import time
 
 import requests
 import requests_unixsocket
+import os
 
 logger = logging.getLogger("sandbox.client")
 
@@ -33,6 +34,10 @@ class SandboxClient:
     def health(self, timeout: float = 2.0) -> dict:
         logger.debug("UDS connection: GET /health via %s", self.socket_path)
         try:
+            print("exists:", os.path.exists(self.socket_path))
+            print("is socket path file:", os.path.isfile(self.socket_path))
+            print("parent dir:", os.listdir(os.path.dirname(self.socket_path)))
+
             resp = self._session.get(self._url("/health"), timeout=timeout)
             resp.raise_for_status()
             return resp.json()
@@ -74,11 +79,12 @@ class SandboxClient:
             }
         return resp.json()
 
-    def reset(self, timeout: float = 5.0) -> None:
+    def reset(self, timeout: float = 5.0) -> dict:
         logger.info("UDS request: POST /reset via %s", self.socket_path)
         try:
             resp = self._session.post(self._url("/reset"), timeout=timeout)
             resp.raise_for_status()
+            return resp.json()
         except Exception as exc:
             raise SandboxClientError(f"reset failed for {self.socket_path}: {exc}") from exc
 
