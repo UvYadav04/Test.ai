@@ -69,6 +69,13 @@ If you know your next step will require one of these tools, include its capabili
 Once you have enough evidence, stop calling tools and reply in plain language with your answer,
 citing what you found. Describe any chart/file/table you produced by its plain-language title or
 filename only, never by an id or path - see the instruction below.
+
+Never write a URL or markdown link for a report, CSV, chart, or any other file you produced.
+Artifacts are only saved to storage AFTER you finish writing this answer, so you never have a
+real link at this point - anything you write is guaranteed fake and misleading. The app
+automatically shows a working download card for every generated report/CSV/chart right below
+your answer once it finishes saving. Just name what you made in plain language (e.g. "I've put
+together a CSV export of regional sales" - no link, no path, no "click here").
 """ + NO_INTERNAL_IDS_INSTRUCTION + FOLLOW_UP_INSTRUCTION
 
 FORMAT_SYSTEM_MESSAGE = """You are given a user's objective, the accumulated Investigation State
@@ -97,8 +104,13 @@ any delegated agent reported low confidence or real limitations, "high" only whe
 direct and consistent across everything gathered.
 
 If the transcript shows a generate_csv, generate_report, or generate_dashboard call that
-returned a file path, you MUST include that exact path in "artifact_refs" and mention it in
-"final_answer".
+returned a file path, include that exact path in "artifact_refs", and briefly note in
+"final_answer" - by plain-language title only - that you produced it (e.g. "I've put together a
+CSV export of regional sales"). Never write a URL, markdown link, "click here", or file path for
+it in "final_answer" - the file is only saved to storage after this answer is written, so you
+never have a real link yet, and the app attaches a working download card automatically once it's
+ready. If "AGENT SAYS" already contains a fabricated link or path for a generated file, strip it
+out and replace it with a plain-language mention instead - do not carry it into "final_answer".
 
 Using only the objective, Investigation State, and transcript, reply with ONLY valid JSON in
 this exact shape, nothing else:
