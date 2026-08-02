@@ -4,10 +4,13 @@ import time
 import chromadb
 
 from config import get_settings
+from shared.observability import get_tracer
 from vectordb.base import BaseVectorStore
 from vectordb.schema import ChunkRecord
 
 logger = logging.getLogger("vectordb.chroma")
+
+_tracer = get_tracer("analyzerEngine.rag")
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -35,18 +38,22 @@ class ChromaVectorStore(BaseVectorStore):
 
     def query(self, query_text: str, top_k: int, filters: dict = None) -> list:
         start = time.perf_counter()
-        result = self.collection.query(
-            query_texts=[query_text],
-            n_results=top_k,
-            where=filters,
-            include=["documents", "metadatas", "distances"],
-        )
-        chunks = self._to_chunks(result, batched=True)
-        logger.info(
-            "chroma query took %.3fs (top_k=%d, returned=%d)",
-            time.perf_counter() - start, top_k, len(chunks),
-        )
-        return chunks
+        with _tracer.start_as_current_span(
+            "rag.retrieval", attributes={"rag.top_k": top_k, "rag.query_chars": len(query_text or "")},
+        ) as span:
+            result = self.collection.query(
+                query_texts=[query_text],
+                n_results=top_k,
+                where=filters,
+                include=["documents", "metadatas", "distances"],
+            )
+            chunks = self._to_chunks(result, batched=True)
+            span.set_attribute("rag.results_returned", len(chunks))
+            logger.info(
+                "chroma query took %.3fs (top_k=%d, returned=%d)",
+                time.perf_counter() - start, top_k, len(chunks),
+            )
+            return chunks
 
     def get_by_id(self, ids: list) -> list:
         start = time.perf_counter()

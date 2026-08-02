@@ -12,7 +12,7 @@ from agents.thread_context import thread_context_brief
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
 from tools.document.document_tools import DocumentTools
-from tools.orchestrator.models import DocumentFindings
+from tools.orchestrator.models import DocumentFindings, InvestigationCancelled
 from vectordb.chroma_store import ChromaVectorStore
 from vectordb.reranker import DeepInfraReranker
 
@@ -56,7 +56,7 @@ class DocumentAgent:
 
     async def run(
         self, objective: str, constraints: dict = None, on_event=None, metadata_brief: str = None,
-        thread_context: dict = None,
+        thread_context: dict = None, cancel_check=None,
     ) -> DocumentFindings:
 
         await self.agent.on_reset(CancellationToken())
@@ -75,19 +75,39 @@ class DocumentAgent:
         tool_timer = ToolCallTimer(self.logger)
         transcript = []
         final_text = ""
-        async for event in self.agent.run_stream(task=task):
-            if not hasattr(event, "messages"):
-                log_event(self.logger, event)
-                tool_timer.record(event)
-                line = self._transcript_line(event)
-                if line:
-                    transcript.append(line)
-                if type(event).__name__ == "TextMessage" and event.source == self.agent.name:
-                    final_text = event.content
-                if on_event is not None:
-                    translated = self._translate_event(event)
-                    if translated:
-                        await on_event(translated)
+        # Checked after every streamed event, same as OrchestratorAgent.run() - without this, a
+        # cancel request made while this agent is mid-way through several search/verify tool
+        # calls (max_tool_iterations=10) had no effect until the whole nested run finished on its
+        # own, since the orchestrator's own cancel_check only fires again once
+        # invoke_document_agent's single tool call returns.
+        stream = self.agent.run_stream(task=task)
+        try:
+            async for event in stream:
+                if not hasattr(event, "messages"):
+                    log_event(self.logger, event)
+                    tool_timer.record(event)
+                    line = self._transcript_line(event)
+                    if line:
+                        transcript.append(line)
+                    if type(event).__name__ == "TextMessage" and event.source == self.agent.name:
+                        final_text = event.content
+                    if on_event is not None:
+                        translated = self._translate_event(event)
+                        if translated:
+                            await on_event(translated)
+
+                if cancel_check is not None and await cancel_check():
+                    await stream.aclose()
+                    if on_event is not None:
+                        await on_event({"type": "cancelled", "message": "Investigation cancelled."})
+                    raise InvestigationCancelled()
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    pass
 
         self.logger.info("final reply: %s", final_text)
         self.logger.info("document agent run took %.3fs", time.perf_counter() - run_start)

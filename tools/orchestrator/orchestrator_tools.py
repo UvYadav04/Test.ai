@@ -49,6 +49,10 @@ class OrchestratorTools:
         self.reporting = ReportingTools(storage, output_dir=reports_dir) if storage else None
         self.reports_dir = reports_dir
         self.on_event = None
+        # Set alongside on_event in OrchestratorAgent.run() - threaded down into
+        # invoke_tabular_agent/invoke_document_agent so a cancel request takes effect while one
+        # of those nested agent loops is mid-flight, not only once it returns.
+        self.cancel_check = None
         self._last_transform_script: Optional[str] = None
         self._last_tabular_file_ids: list = []
 
@@ -178,7 +182,9 @@ class OrchestratorTools:
                 "in your findings' artifact_refs."
             )
 
-        result = await agent.run(effective_objective, constraints, on_event=self.on_event)
+        result = await agent.run(
+            effective_objective, constraints, on_event=self.on_event, cancel_check=self.cancel_check,
+        )
 
         if agent.last_transform_script:
             self._last_transform_script = agent.last_transform_script
@@ -218,7 +224,10 @@ class OrchestratorTools:
             self.catalog, vector_store, [f.file_id for f in assigned_files],
         )
         agent = DocumentAgent(assigned_files, vector_store=vector_store, reranker=self._get_reranker())
-        result = await agent.run(objective, constraints, on_event=self.on_event, metadata_brief=metadata_brief)
+        result = await agent.run(
+            objective, constraints, on_event=self.on_event, metadata_brief=metadata_brief,
+            cancel_check=self.cancel_check,
+        )
         self.result_collector.add_document_findings(
             result, "invoke_document_agent", [f.file_id for f in assigned_files],
         )

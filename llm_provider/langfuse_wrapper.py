@@ -13,42 +13,41 @@ from autogen_core.models import (
 )
 from autogen_core.tools import Tool, ToolSchema
 
-from config import get_settings
+from shared.observability import get_langfuse_client, get_meter
 
 logger = logging.getLogger("llm_provider.langfuse")
 
 calls_logger = logging.getLogger("llm_provider.calls")
 calls_logger.setLevel(logging.WARNING)
 
-_langfuse_client = None
-_langfuse_checked = False
+# Plain OTel token-usage counter, independent of whether Langfuse is configured - so "token
+# usage" (per the observability spec's metrics list) shows up in Grafana Cloud even for anyone
+# who only wired up the Alloy/Grafana side and skipped Langfuse Cloud.
+_meter = get_meter("llm_provider")
+_token_usage = _meter.create_counter(
+    "llm.tokens", unit="tokens", description="LLM tokens consumed, keyed by provider/model/direction",
+)
+_llm_call_duration = _meter.create_histogram(
+    "llm.call.duration_ms", unit="ms", description="LLM call wall time, keyed by provider/model/outcome",
+)
+
+
+def _record_tokens(provider: str, model: str, usage) -> None:
+    if usage is None:
+        return
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    if prompt is not None:
+        _token_usage.add(prompt, {"provider": provider, "model": model or "default", "direction": "input"})
+    if completion is not None:
+        _token_usage.add(completion, {"provider": provider, "model": model or "default", "direction": "output"})
 
 
 def _get_langfuse():
-    global _langfuse_client, _langfuse_checked
-    if _langfuse_checked:
-        return _langfuse_client
-    _langfuse_checked = True
-
-    settings = get_settings()
-    public_key = settings.get("LANGFUSE_PUBLIC_KEY")
-    secret_key = settings.get("LANGFUSE_SECRET_KEY")
-    if not public_key or not secret_key:
-        logger.info("LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY not set - LLM call tracing disabled")
-        return None
-
-    try:
-        from langfuse import Langfuse
-    except ImportError:
-        logger.warning("langfuse is not installed - add it to analyzerEngine/requirements.txt")
-        return None
-
-    _langfuse_client = Langfuse(
-        public_key=public_key,
-        secret_key=secret_key,
-        base_url=settings.get("LANGFUSE_HOST", "http://langfuse-web:3000"),
-    )
-    return _langfuse_client
+    # Delegates to shared/observability.py so there's exactly one place that constructs the
+    # Langfuse client (via get_client(), reading LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY from the
+    # environment - Langfuse Cloud by default, no self-hosted base_url hardcoded anywhere).
+    return get_langfuse_client()
 
 
 def _serialize_messages(messages):
@@ -115,9 +114,16 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
                 self._provider_name, self._model or "default", elapsed, len(tools), exc,
             )
             calls_logger.warning("llm request [%x] failed after %.3fs: %s", call_id, elapsed, exc)
+            _llm_call_duration.record(
+                elapsed * 1000, {"provider": self._provider_name, "model": self._model or "default", "outcome": "error"},
+            )
             raise
         elapsed = time.monotonic() - start
         usage = getattr(result, "usage", None)
+        _record_tokens(self._provider_name, self._model, usage)
+        _llm_call_duration.record(
+            elapsed * 1000, {"provider": self._provider_name, "model": self._model or "default", "outcome": "ok"},
+        )
         logger.info(
             "llm call %s/%s took %.3fs (tools=%d, tokens in/out=%s/%s)",
             self._provider_name, self._model or "default", elapsed, len(tools),
@@ -147,8 +153,12 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
             name=f"{self._provider_name}.create",
             as_type="generation",
             model=self._model or self._provider_name,
+            model_parameters={
+                "temperature": (extra_create_args or {}).get("temperature"),
+                "tool_choice": str(tool_choice),
+            },
             input=_serialize_messages(messages),
-            metadata={"provider": self._provider_name, "tool_count": len(tools)},
+            metadata={"provider": self._provider_name, "tool_count": len(tools), "tools": _serialize_tools(tools)},
         )
         try:
             result = await self._inner.create(
@@ -160,6 +170,10 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
             raise
         else:
             usage = getattr(result, "usage", None)
+            tool_calls = [
+                c for c in (result.content if isinstance(result.content, list) else [])
+                if hasattr(c, "name") or hasattr(c, "arguments")
+            ]
             generation.update(
                 output=result.content,
                 usage_details=(
@@ -174,6 +188,7 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
                     "finish_reason": getattr(result, "finish_reason", None),
                     "cached": getattr(result, "cached", None),
                     "latency_s": round(time.monotonic() - start, 3),
+                    "tool_calls": _safe_json(tool_calls) if tool_calls else None,
                 },
             )
             return result
@@ -194,12 +209,25 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
                 }),
             )
         chunk_count = 0
+        last_chunk = None
+        langfuse = _get_langfuse()
+        generation = None
+        if langfuse is not None:
+            generation = langfuse.start_observation(
+                name=f"{self._provider_name}.create_stream",
+                as_type="generation",
+                model=self._model or self._provider_name,
+                model_parameters={"tool_choice": str(tool_choice)},
+                input=_serialize_messages(messages),
+                metadata={"provider": self._provider_name, "tool_count": len(tools), "streaming": True},
+            )
         try:
             async for chunk in self._inner.create_stream(
                 messages, tools=tools, tool_choice=tool_choice, json_output=json_output,
                 extra_create_args=extra_create_args, cancellation_token=cancellation_token,
             ):
                 chunk_count += 1
+                last_chunk = chunk
                 yield chunk
         except Exception as exc:
             elapsed = time.monotonic() - start
@@ -208,6 +236,11 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
                 self._provider_name, self._model or "default", elapsed, chunk_count, exc,
             )
             calls_logger.warning("llm stream [%x] failed after %.3fs (%d chunks): %s", call_id, elapsed, chunk_count, exc)
+            _llm_call_duration.record(
+                elapsed * 1000, {"provider": self._provider_name, "model": self._model or "default", "outcome": "error"},
+            )
+            if generation is not None:
+                generation.update(level="ERROR", status_message=str(exc))
             raise
         else:
             elapsed = time.monotonic() - start
@@ -216,6 +249,29 @@ class LangfuseTracedChatCompletionClient(ChatCompletionClient):
                 self._provider_name, self._model or "default", elapsed, chunk_count,
             )
             calls_logger.info("llm stream response [%x] completed in %.3fs (%d chunks)", call_id, elapsed, chunk_count)
+            usage = getattr(last_chunk, "usage", None)
+            _record_tokens(self._provider_name, self._model, usage)
+            _llm_call_duration.record(
+                elapsed * 1000, {"provider": self._provider_name, "model": self._model or "default", "outcome": "ok"},
+            )
+            if generation is not None:
+                # autogen's create_stream yields str chunks and finishes with a CreateResult -
+                # that final chunk is the only one with usage/content worth recording.
+                generation.update(
+                    output=getattr(last_chunk, "content", last_chunk),
+                    usage_details=(
+                        {
+                            "input": getattr(usage, "prompt_tokens", None),
+                            "output": getattr(usage, "completion_tokens", None),
+                        }
+                        if usage is not None
+                        else None
+                    ),
+                    metadata={"finish_reason": getattr(last_chunk, "finish_reason", None), "latency_s": round(elapsed, 3)},
+                )
+        finally:
+            if generation is not None:
+                generation.end()
 
     async def close(self) -> None:
         await self._inner.close()

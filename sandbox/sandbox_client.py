@@ -6,7 +6,15 @@ import requests
 import requests_unixsocket
 import os
 
+from shared.observability import get_meter, get_tracer
+
 logger = logging.getLogger("sandbox.client")
+
+_tracer = get_tracer("analyzerEngine.sandbox")
+_meter = get_meter("analyzerEngine.sandbox")
+_execute_duration = _meter.create_histogram(
+    "sandbox.execute.duration_ms", unit="ms", description="Sandbox code execution wall time",
+)
 
 
 class SandboxClientError(RuntimeError):
@@ -47,37 +55,47 @@ class SandboxClient:
     def execute(self, code: str, tables: dict, workspace_id: str, timeout_seconds: float = None) -> dict:
         timeout = timeout_seconds or self.timeout_seconds
         t0 = time.perf_counter()
-        logger.info(
-            "UDS request start: POST /execute via %s (workspace=%s, tables=%d, timeout=%.0fs)",
-            self.socket_path, workspace_id, len(tables), timeout,
-        )
-        try:
-            resp = self._session.post(
-                self._url("/execute"),
-                json={"code": code, "tables": tables, "workspace_id": workspace_id},
-                timeout=timeout,
+        with _tracer.start_as_current_span(
+            "sandbox.execute",
+            attributes={"workspace.id": workspace_id, "sandbox.table_count": len(tables), "sandbox.timeout_s": timeout},
+        ) as span:
+            logger.info(
+                "UDS request start: POST /execute via %s (workspace=%s, tables=%d, timeout=%.0fs)",
+                self.socket_path, workspace_id, len(tables), timeout,
             )
-        except requests.exceptions.Timeout as exc:
-            elapsed = time.perf_counter() - t0
-            logger.warning("UDS request TIMED OUT after %.1fs: POST /execute via %s", elapsed, self.socket_path)
-            raise SandboxClientError(f"sandbox execution timed out after {timeout}s") from exc
-        except Exception as exc:
-            logger.error("UDS request failed: POST /execute via %s: %s", self.socket_path, exc)
-            raise SandboxClientError(f"could not reach sandbox over UDS {self.socket_path}: {exc}") from exc
+            try:
+                resp = self._session.post(
+                    self._url("/execute"),
+                    json={"code": code, "tables": tables, "workspace_id": workspace_id},
+                    timeout=timeout,
+                )
+            except requests.exceptions.Timeout as exc:
+                elapsed = time.perf_counter() - t0
+                logger.warning("UDS request TIMED OUT after %.1fs: POST /execute via %s", elapsed, self.socket_path)
+                _execute_duration.record(elapsed * 1000, {"outcome": "timeout"})
+                span.record_exception(exc)
+                raise SandboxClientError(f"sandbox execution timed out after {timeout}s") from exc
+            except Exception as exc:
+                logger.error("UDS request failed: POST /execute via %s: %s", self.socket_path, exc)
+                _execute_duration.record((time.perf_counter() - t0) * 1000, {"outcome": "error"})
+                span.record_exception(exc)
+                raise SandboxClientError(f"could not reach sandbox over UDS {self.socket_path}: {exc}") from exc
 
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        logger.info(
-            "UDS request end: POST /execute via %s completed in %.1fms (status=%s)",
-            self.socket_path, elapsed_ms, resp.status_code,
-        )
-        if resp.status_code != 200:
-            body = resp.text[:500]
-            return {
-                "stdout": "",
-                "saved": [],
-                "error": f"sandbox server error ({resp.status_code}): {body}",
-            }
-        return resp.json()
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            _execute_duration.record(elapsed_ms, {"outcome": "ok" if resp.status_code == 200 else "http_error"})
+            span.set_attribute("sandbox.status_code", resp.status_code)
+            logger.info(
+                "UDS request end: POST /execute via %s completed in %.1fms (status=%s)",
+                self.socket_path, elapsed_ms, resp.status_code,
+            )
+            if resp.status_code != 200:
+                body = resp.text[:500]
+                return {
+                    "stdout": "",
+                    "saved": [],
+                    "error": f"sandbox server error ({resp.status_code}): {body}",
+                }
+            return resp.json()
 
     def reset(self, timeout: float = 5.0) -> dict:
         logger.info("UDS request: POST /reset via %s", self.socket_path)

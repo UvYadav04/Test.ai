@@ -12,9 +12,9 @@ from agents.logger import get_agent_logger, log_event
 from agents.tabular.config import get_model_config, get_system_message
 from agents.thread_context import thread_context_brief
 from agents.timing import ToolCallTimer
-from llm_provider import LLMProvider
+from llm_provider import LLMProvider, get_settings
 from sandbox.path_resolver import InvalidArtifactIdError, get_parquet_path
-from tools.orchestrator.models import TabularFindings
+from tools.orchestrator.models import InvestigationCancelled, TabularFindings
 from tools.tabular.tabular_tools import TabularTools
 
 
@@ -32,7 +32,13 @@ class TabularAgent:
             reports_dir=reports_dir, chart_capacity_checker=chart_capacity_checker,
         )
         model_config = get_model_config()
-        client = LLMProvider(model_config["provider"]).get_client(model_config["model"])
+        # Matches OrchestratorAgent/DocumentAgent (see agents/document/agent.py) - previously
+        # TabularAgent had no failover, so a fully-down primary provider had no recovery path
+        # during tabular analysis even though the other two agent types did.
+        fallback_provider = get_settings().get("FALLBACK_LLM_PROVIDER", "groq")
+        client = LLMProvider(
+            model_config["provider"], fallback_provider=fallback_provider,
+        ).get_client(model_config["model"])
 
         self.agent = AssistantAgent(
             name="tabular_agent",
@@ -51,6 +57,7 @@ class TabularAgent:
 
     async def run(
         self, objective: str, constraints: dict = None, on_event=None, thread_context: dict = None,
+        cancel_check=None,
     ) -> TabularFindings:
         await self.agent.on_reset(CancellationToken())
         self.last_transform_script = None
@@ -74,20 +81,40 @@ class TabularAgent:
         tool_timer = ToolCallTimer(self.logger)
         transcript = []
         final_text = ""
-        async for event in self.agent.run_stream(task=task):
-            if not hasattr(event, "messages"):
-                log_event(self.logger, event)
-                tool_timer.record(event)
-                self._capture_run_python_call(event)
-                line = self._transcript_line(event)
-                if line:
-                    transcript.append(line)
-                if type(event).__name__ == "TextMessage" and event.source == self.agent.name:
-                    final_text = event.content
-                if on_event is not None:
-                    translated = self._translate_event(event)
-                    if translated:
-                        await on_event(translated)
+        # Checked after every streamed event, same as OrchestratorAgent.run() - without this, a
+        # cancel request made while this agent is mid-way through several run_python/
+        # create_visualizations tool calls (max_tool_iterations=10) had no effect until the whole
+        # nested run finished on its own, since the orchestrator's own cancel_check only fires
+        # again once invoke_tabular_agent's single tool call returns.
+        stream = self.agent.run_stream(task=task)
+        try:
+            async for event in stream:
+                if not hasattr(event, "messages"):
+                    log_event(self.logger, event)
+                    tool_timer.record(event)
+                    self._capture_run_python_call(event)
+                    line = self._transcript_line(event)
+                    if line:
+                        transcript.append(line)
+                    if type(event).__name__ == "TextMessage" and event.source == self.agent.name:
+                        final_text = event.content
+                    if on_event is not None:
+                        translated = self._translate_event(event)
+                        if translated:
+                            await on_event(translated)
+
+                if cancel_check is not None and await cancel_check():
+                    await stream.aclose()
+                    if on_event is not None:
+                        await on_event({"type": "cancelled", "message": "Investigation cancelled."})
+                    raise InvestigationCancelled()
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    pass
 
         self.logger.info("tabular agent run took %.3fs", time.perf_counter() - run_start)
         real_refs = self._real_refs(self._extract_refs(transcript, "file_id"))

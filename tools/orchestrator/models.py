@@ -100,6 +100,26 @@ class FinalResultCollector:
             self.add_artifact(ref, kind="document_artifact", source_tool=source_tool)
 
 
+class InvestigationCancelled(Exception):
+    """Raised by any agent's run loop (Orchestrator, Tabular, Document) once it notices
+    cancel_check() has tripped, so run_investigation's single `except InvestigationCancelled:`
+    handler catches it the same way regardless of which layer actually detected the cancellation
+    - the orchestrator's own loop, or a nested invoke_tabular_agent/invoke_document_agent call
+    that used to keep running to completion even after the user cancelled (see TabularAgent.run/
+    DocumentAgent.run). Lives here (not agents/orchestrator/agent.py, where it originated) so
+    agents/tabular/agent.py and agents/document/agent.py can raise it too without an import cycle
+    (both are imported BY tools.orchestrator.orchestrator_tools, which agents/orchestrator/agent.py
+    imports).
+
+    `state` is optional - only the full Orchestrator run has an InvestigationState to attach;
+    direct-route/nested calls have nothing to put here, and nothing currently reads this
+    attribute after catching the exception anyway."""
+
+    def __init__(self, state=None):
+        super().__init__("investigation cancelled")
+        self.state = state
+
+
 @dataclass
 class InvestigationState:
     session_id: str

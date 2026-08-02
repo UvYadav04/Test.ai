@@ -610,7 +610,6 @@ class SandboxManager:
             logger.exception("failed to remove socket file %s", handle.socket_path)
         self._metrics.total_destroyed += 1
 
-    # -------------------------------------------------------------------------- reaper ----
 
     def _reap_loop(self) -> None:
         logger.info("pool reaper started (interval=%ds, idle_timeout=%ds, min_size=%d)",
@@ -624,7 +623,6 @@ class SandboxManager:
     def _reap_once(self) -> None:
         now = time.time()
 
-        # 1) idle sandboxes that have overstayed get destroyed, but never below min_size.
         with self._lock:
             idle_oldest_first = sorted(self._idle.values(), key=lambda h: h.last_used_at)
             capacity_above_min = self._total_locked() - self.min_size
@@ -649,9 +647,6 @@ class SandboxManager:
                 _DESTROYED_IDLE.inc()
             self._destroy_handle(h)
 
-        # 2) health-check whatever idle sandboxes remain; evict+replace anything unresponsive.
-        # Busy sandboxes are skipped - they're actively serving a request and execute()/release()
-        # already treats a failed call as unhealthy.
         with self._lock:
             idle_snapshot = list(self._idle.values())
         unhealthy = [h for h in idle_snapshot if not self._check_health(h)]

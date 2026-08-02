@@ -15,12 +15,27 @@ from agents.orchestrator.config import SYSTEM_MESSAGE, get_model_config
 from agents.thread_context import thread_context_brief
 from agents.timing import ToolCallTimer
 from llm_provider import LLMProvider, get_settings
-from tools.orchestrator.models import FinalResultCollector, InvestigationState, OrchestratorResult
+from shared.observability import get_meter, get_tracer
+from tools.orchestrator.models import (
+    FinalResultCollector, InvestigationCancelled, InvestigationState, OrchestratorResult,
+)
 from tools.orchestrator.orchestrator_tools import OrchestratorTools
 
 _AGENT_NAME = "orchestrator_agent"
 
 _MAX_OUTER_ITERATIONS = 25
+
+_tracer = get_tracer("analyzerEngine.orchestrator")
+_meter = get_meter("analyzerEngine.orchestrator")
+_tool_duration = _meter.create_histogram(
+    "orchestrator.tool.duration_ms", unit="ms", description="Orchestrator tool call wall time, keyed by tool name",
+)
+
+try:
+    from opentelemetry.trace import Status, StatusCode
+    _ERROR_STATUS = Status(StatusCode.ERROR)
+except ImportError:  # pragma: no cover - opentelemetry-api is always a transitive dep, defend anyway
+    _ERROR_STATUS = None
 
 
 class _CapabilityHolder:
@@ -40,14 +55,46 @@ def _wrap_with_next_capabilities(func, holder: "_CapabilityHolder"):
     )
     new_sig = orig_sig.replace(parameters=[*orig_sig.parameters.values(), next_capabilities_param])
 
+    tool_name = getattr(func, "__name__", "tool")
+
     if inspect.iscoroutinefunction(func):
         async def wrapper(**kwargs):
             holder.value = list(kwargs.pop("next_capabilities", None) or [])
-            return await func(**kwargs)
+            # One span per orchestrator tool call - covers every registered tool (tool
+            # selection/execution: invoke_tabular_agent, invoke_document_agent, generate_report,
+            # rag/retrieval tools, run_python, etc.) from a single instrumentation point rather
+            # than hand-wrapping each tool method individually.
+            t0 = time.monotonic()
+            outcome = "ok"
+            with _tracer.start_as_current_span(f"tool.{tool_name}") as span:
+                try:
+                    result = await func(**kwargs)
+                except Exception as exc:
+                    outcome = "error"
+                    span.record_exception(exc)
+                    if _ERROR_STATUS is not None:
+                        span.set_status(_ERROR_STATUS)
+                    raise
+                finally:
+                    _tool_duration.record((time.monotonic() - t0) * 1000, {"tool": tool_name, "outcome": outcome})
+                return result
     else:
         def wrapper(**kwargs):
             holder.value = list(kwargs.pop("next_capabilities", None) or [])
-            return func(**kwargs)
+            t0 = time.monotonic()
+            outcome = "ok"
+            with _tracer.start_as_current_span(f"tool.{tool_name}") as span:
+                try:
+                    result = func(**kwargs)
+                except Exception as exc:
+                    outcome = "error"
+                    span.record_exception(exc)
+                    if _ERROR_STATUS is not None:
+                        span.set_status(_ERROR_STATUS)
+                    raise
+                finally:
+                    _tool_duration.record((time.monotonic() - t0) * 1000, {"tool": tool_name, "outcome": outcome})
+                return result
 
     wrapper.__name__ = func.__name__
     wrapper.__signature__ = new_sig
@@ -64,12 +111,6 @@ def _wrap_with_next_capabilities(func, holder: "_CapabilityHolder"):
         "again if you still need them after that."
     )
     return wrapper
-
-
-class InvestigationCancelled(Exception):
-    def __init__(self, state: InvestigationState):
-        super().__init__("investigation cancelled")
-        self.state = state
 
 
 class OrchestratorAgent:
@@ -114,6 +155,7 @@ class OrchestratorAgent:
             constraints=constraints,
         )
         self.tools.on_event = on_event
+        self.tools.cancel_check = cancel_check
 
         task = (
             f"Objective: {objective}\n"
@@ -132,61 +174,76 @@ class OrchestratorAgent:
         active_capabilities: list[str] = []
         next_task = task
 
-        for outer_iteration in range(_MAX_OUTER_ITERATIONS):
-            tool_names = capabilities.CORE_TOOLS + capabilities.tools_for_capabilities(active_capabilities)
-            iteration_agent = AssistantAgent(
-                name=_AGENT_NAME,
-                model_client=self.model_client,
-                tools=[self._wrapped_tools[name] for name in tool_names],
-                model_context=model_context,
-                system_message=SYSTEM_MESSAGE,
-                reflect_on_tool_use=False,
-                max_tool_iterations=1,
-            )
-            self._capability_holder.value = []
-            ended_in_final_answer = False
-
-            self.logger.info(
-                "orchestrator outer iteration %d: exposing %d tools (%s)",
-                outer_iteration, len(tool_names), ", ".join(tool_names),
-            )
-            stream = iteration_agent.run_stream(task=next_task)
-            next_task = None
+        # "Planner execution" span - the outer iteration loop is the orchestrator's own
+        # plan/act/observe cycle (each iteration re-plans which tools to expose next based on
+        # next_capabilities). Wraps the whole loop so it shows as one workflow-level span with
+        # every tool-call span (see agent.py's _wrap_with_next_capabilities) nested underneath.
+        with _tracer.start_as_current_span(
+            "orchestrator.planner_loop", attributes={"objective.chars": len(objective)},
+        ) as planner_span:
             try:
-                async for event in stream:
-                    if not hasattr(event, "messages"):
-                        log_event(self.logger, event)
-                        tool_timer.record(event)
-                        if type(event).__name__ == "TextMessage" and getattr(event, "source", None) == _AGENT_NAME:
-                            final_text = event.content
-                            ended_in_final_answer = True
-                        if on_event is not None:
-                            translated = self._translate_event(event)
-                            if translated:
-                                await on_event(translated)
+                for outer_iteration in range(_MAX_OUTER_ITERATIONS):
+                    tool_names = capabilities.CORE_TOOLS + capabilities.tools_for_capabilities(active_capabilities)
+                    iteration_agent = AssistantAgent(
+                        name=_AGENT_NAME,
+                        model_client=self.model_client,
+                        tools=[self._wrapped_tools[name] for name in tool_names],
+                        model_context=model_context,
+                        system_message=SYSTEM_MESSAGE,
+                        reflect_on_tool_use=False,
+                        max_tool_iterations=1,
+                    )
+                    self._capability_holder.value = []
+                    ended_in_final_answer = False
 
-                    if cancel_check is not None and await cancel_check():
-                        await stream.aclose()
-                        if on_event is not None:
-                            await on_event({"type": "cancelled", "message": "Investigation cancelled."})
-                        raise InvestigationCancelled(self.tools.state)
-            finally:
-                aclose = getattr(stream, "aclose", None)
-                if aclose is not None:
+                    self.logger.info(
+                        "orchestrator outer iteration %d: exposing %d tools (%s)",
+                        outer_iteration, len(tool_names), ", ".join(tool_names),
+                    )
+                    stream = iteration_agent.run_stream(task=next_task)
+                    next_task = None
                     try:
-                        await aclose()
-                    except Exception:
-                        pass
+                        async for event in stream:
+                            if not hasattr(event, "messages"):
+                                log_event(self.logger, event)
+                                tool_timer.record(event)
+                                if type(event).__name__ == "TextMessage" and getattr(event, "source", None) == _AGENT_NAME:
+                                    final_text = event.content
+                                    ended_in_final_answer = True
+                                if on_event is not None:
+                                    translated = self._translate_event(event)
+                                    if translated:
+                                        await on_event(translated)
 
-            if ended_in_final_answer:
-                break
+                            if cancel_check is not None and await cancel_check():
+                                await stream.aclose()
+                                if on_event is not None:
+                                    await on_event({"type": "cancelled", "message": "Investigation cancelled."})
+                                raise InvestigationCancelled(self.tools.state)
+                    finally:
+                        aclose = getattr(stream, "aclose", None)
+                        if aclose is not None:
+                            try:
+                                await aclose()
+                            except Exception:
+                                pass
 
-            active_capabilities = list(self._capability_holder.value)
-        else:
-            self.logger.warning(
-                "orchestrator hit _MAX_OUTER_ITERATIONS (%d) without a final text answer",
-                _MAX_OUTER_ITERATIONS,
-            )
+                    if ended_in_final_answer:
+                        break
+
+                    active_capabilities = list(self._capability_holder.value)
+                else:
+                    self.logger.warning(
+                        "orchestrator hit _MAX_OUTER_ITERATIONS (%d) without a final text answer",
+                        _MAX_OUTER_ITERATIONS,
+                    )
+                planner_span.set_attribute("orchestrator.outer_iterations", outer_iteration + 1)
+            except Exception as exc:
+                if not isinstance(exc, InvestigationCancelled):
+                    planner_span.record_exception(exc)
+                    if _ERROR_STATUS is not None:
+                        planner_span.set_status(_ERROR_STATUS)
+                raise
 
         self.logger.info("orchestrator agent run took %.3fs", time.perf_counter() - run_start)
         collector = self.tools.result_collector
