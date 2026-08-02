@@ -14,8 +14,3 @@ autogen-core
 autogen-agentchat
 autogen-ext[openai]
 autogen-ext[anthropic]
-# Pinned to v4 - llm_provider/langfuse_wrapper.py uses the v4 start_observation(as_type="generation")
-# API. langfuse v3's start_generation() was removed in v4; an unpinned install would silently pull
-# whatever is newest and either break (pre-v4, missing start_observation) or drift across a future
-# major bump. Bump this deliberately, together with langfuse_wrapper.py, if upgrading again.
-langfuse>=4.14.1,<5
