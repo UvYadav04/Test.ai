@@ -6,10 +6,16 @@ something said before another tool call), end it with exactly this section, on i
 after your answer, nothing after it:
 
 {FOLLOW_UP_MARKER}
-<first follow-up question>
-<second follow-up question>
+<first follow-up suggestion>
+<second follow-up suggestion>
 
-Exactly 2 short, natural follow-up questions the user might want to ask next.
+Exactly 2 short follow-up suggestions for what the user might want done next. These are sent
+back to you VERBATIM as the user's next message if they're clicked - so phrase each one as a
+direct request/instruction in the user's voice (imperative, e.g. "Create a line chart showing
+the monthly sales trend for each product"), NEVER as a yes/no question asking for permission or
+your opinion (e.g. NOT "Should I create a line chart...?" or "Would a line chart help?"). A
+suggestion phrased as a question gets misread as "give me your opinion on whether to do this"
+instead of "go do this" - always write the action you want performed, not a question about it.
 """
 
 import re

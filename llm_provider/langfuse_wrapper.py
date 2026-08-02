@@ -20,9 +20,6 @@ logger = logging.getLogger("llm_provider.langfuse")
 calls_logger = logging.getLogger("llm_provider.calls")
 calls_logger.setLevel(logging.WARNING)
 
-# Plain OTel token-usage counter, independent of whether Langfuse is configured - so "token
-# usage" (per the observability spec's metrics list) shows up in Grafana Cloud even for anyone
-# who only wired up the Alloy/Grafana side and skipped Langfuse Cloud.
 _meter = get_meter("llm_provider")
 _token_usage = _meter.create_counter(
     "llm.tokens", unit="tokens", description="LLM tokens consumed, keyed by provider/model/direction",
@@ -44,9 +41,6 @@ def _record_tokens(provider: str, model: str, usage) -> None:
 
 
 def _get_langfuse():
-    # Delegates to shared/observability.py so there's exactly one place that constructs the
-    # Langfuse client (via get_client(), reading LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY from the
-    # environment - Langfuse Cloud by default, no self-hosted base_url hardcoded anywhere).
     return get_langfuse_client()
 
 
